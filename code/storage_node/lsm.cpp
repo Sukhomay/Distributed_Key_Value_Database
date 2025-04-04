@@ -1,15 +1,10 @@
+#include <thread>
+#include <mutex>
+
 #include "lsm.h"
 #include "avl_tree.cpp"
 #include "bloomfilter.cpp"
 
-#include <thread>
-#include <mutex>
-
-int comp_time = MAX_COMP_TIME;
-mutex mtx_sstablelist;
-AVLTree tree;
-class SSTable;
-vector<SSTable *> SSTable_list;
 
 string encodeKeyValuePair(const string &key_str, const string &value_str)
 {
@@ -188,7 +183,7 @@ public:
         if (fname == TOMBSTONE)
         {
             int idx = SSTable_list.size();
-            folder_name = "SSTable_" + to_string(idx);
+            folder_name = top_dir + "SSTable_" + to_string(idx);
         }
         else
         {
@@ -351,214 +346,216 @@ public:
     }
 };
 
-ReturnStatus create_SSTable(vector<pair<string, string>> &data)
+class MergeTree
 {
-    try
+public:
+    // Public interface: only SET, DEL, and GET are exposed.
+    MergeTree(const string &_top_dir_ = ".", int _comp_time_ = MAX_COMP_TIME)
+        : top_dir(_top_dir_), comp_time(_comp_time_)
     {
-        // Convert vector to dynamically allocated array
-        int num_keys = data.size();
-        pair<string, string> *data_array = new pair<string, string>[num_keys];
-    
-        for (int i = 0; i < num_keys; ++i)
-        {
-            data_array[i] = data[i];
-        }
-    
-        // Create a pair containing the size and pointer to the array
-        pair<int, pair<string, string> *> data_pair = {num_keys, data_array};
-    
-        mtx_sstablelist.lock();
-        SSTable_list.push_back(new SSTable(data_pair));
-        mtx_sstablelist.unlock();
-    
-        // Clean up dynamically allocated array
-        delete[] data_array;
-        return ReturnStatus::SUCCESS;
+        compaction_thread = thread(&MergeTree::compaction_loop, this);
+        compaction_thread.detach();
     }
-    catch(const std::exception& e)
-    {
-        std::cerr << e.what() << '\n';
-        return ReturnStatus::FAILURE;
-    }
-    
-}
 
-ReturnStatus SET(string &key, string &value)
-{
-    try
+    ~MergeTree()
     {
-        tree.insert(key, value);
-        if (tree.size() == MAX_TREE_SIZE)
+        for (auto st : SSTable_list)
         {
-            vector<pair<string, string>> data = tree.getSortedPairs();
-            create_SSTable(data);
-            tree.clear();
+            if (st != nullptr)
+                delete st;
         }
-        return ReturnStatus::SUCCESS;
     }
-    catch(const std::exception& e)
-    {
-        std::cerr << e.what() << '\n';
-        return ReturnStatus::FAILURE;
-    }
-    
-}
 
-ReturnStatus DEL(string &key)
-{
-    try
+    // Inserts a key/value pair into the in-memory AVLTree.
+    // If the tree reaches MAX_TREE_SIZE, its sorted content is flushed to a new SSTable.
+    ReturnStatus SET(string key, string value)
     {
-        string temp = "tombstone";
-        SET(key, temp);
-        return ReturnStatus::SUCCESS;
-    }
-    catch(const std::exception& e)
-    {
-        std::cerr << e.what() << '\n';
-        return ReturnStatus::FAILURE;
-    }
-    
-}
-
-pair<ReturnStatus, string> GET(strin key)
-{
-    try
-    {
-        auto value = tree.find(key);
-        if (value.first)
+        try
         {
-            return make_pair(ReturnStatus::SUCCESS, value.second);
+            tree.insert(key, value);
+            if (tree.size() >= MAX_TREE_SIZE)
+            {
+                vector<pair<string, string>> data = tree.getSortedPairs();
+                if (create_SSTable(data) == ReturnStatus::FAILURE)
+                    throw runtime_error("Failed to create SSTable");
+                tree.clear();
+            }
+            return ReturnStatus::SUCCESS;
         }
-        mtx_sstablelist.lock();
-        for (int i = (int)SSTable_list.size() - 1; i >= 0; i--)
+        catch (const exception &e)
         {
-            if (SSTable_list[i] == nullptr)
-                continue;
-            value = SSTable_list[i]->find(key);
+            cerr << "SET error: " << e.what() << endl;
+            return ReturnStatus::FAILURE;
+        }
+    }
+
+    // Marks a key as deleted by inserting a tombstone.
+    ReturnStatus DEL(string key)
+    {
+        try
+        {
+            string tomb = TOMBSTONE; // Ensure TOMBSTONE is defined appropriately.
+            return SET(key, tomb);
+        }
+        catch (const exception &e)
+        {
+            cerr << "DEL error: " << e.what() << endl;
+            return ReturnStatus::FAILURE;
+        }
+    }
+
+    // Retrieves the value for a key. It first checks the in-memory AVLTree,
+    // and if not found, it searches through the SSTable list (from most recent to oldest).
+    pair<ReturnStatus, string> GET(string key)
+    {
+        try
+        {
+            auto value = tree.find(key);
             if (value.first)
-            {
-                mtx_sstablelist.unlock();
                 return make_pair(ReturnStatus::SUCCESS, value.second);
-            }
-        }
-    
-        mtx_sstablelist.unlock();
-        return make_pair(ReturnStatus::SUCCESS, TOMBSTONE);
-    }
-    catch(const std::exception& e)
-    {
-        std::cerr << e.what() << '\n';
-        return make_pair(ReturnStatus::FAILURE, "");
-    }
-    
-}
 
-pair<string, string> *read_SSTable(string &folder_name, int data_size)
-{
-    auto *data = new pair<string, string>[data_size];
-
-    int idx = 0; // Current index in the array
-    for (int i = 0;; i++)
-    {
-        string file_name = folder_name + "/" + to_string(i) + ".txt";
-
-        if (!fs::exists(file_name))
-        {
-            break;
-        }
-
-        ifstream file(file_name);
-        if (!file.is_open())
-        {
-            cerr << "Error opening file: " << file_name << endl;
-            continue;
-        }
-
-        string line;
-        while (getline(file, line))
-        {
-            vector<string> tokens = splitString(line);
-            for (size_t j = 0; j < tokens.size(); j += 2)
+            mtx_sstablelist.lock();
+            for (int i = SSTable_list.size() - 1; i >= 0; i--)
             {
-                string _key = tokens[j];
-                string _value = (j + 1 < tokens.size()) ? tokens[j + 1] : TOMBSTONE;
-                data[idx++] = {_key, _value};
+                if (SSTable_list[i] == nullptr)
+                    continue;
+                value = SSTable_list[i]->find(key);
+                if (value.first)
+                {
+                    mtx_sstablelist.unlock();
+                    return make_pair(ReturnStatus::SUCCESS, value.second);
+                }
+            }
+            mtx_sstablelist.unlock();
+            return make_pair(ReturnStatus::SUCCESS, TOMBSTONE);
+        }
+        catch (const exception &e)
+        {
+            cerr << "GET error: " << e.what() << endl;
+            return make_pair(ReturnStatus::FAILURE, "");
+        }
+    }
+
+private:
+    // Private Members
+    int comp_time;                  // Compaction sleep time (microseconds)
+    string top_dir;                 // Top directory for storing SSTables
+    mutex mtx_sstablelist;          // Mutex protecting the SSTable_list
+    AVLTree tree;                   // In-memory tree for recent writes (from avl_tree.cpp)
+    vector<SSTable *> SSTable_list; // List of SSTable pointers
+    thread compaction_thread;       // Background compaction thread
+
+    // Private Helper Functions
+
+    // create_SSTable flushes sorted in-memory data to a new SSTable.
+    ReturnStatus create_SSTable(const vector<pair<string, string>> &data)
+    {
+        try
+        {
+            int num_keys = data.size();
+            pair<string, string> *data_array = new pair<string, string>[num_keys];
+            for (int i = 0; i < num_keys; ++i)
+                data_array[i] = data[i];
+            pair<int, pair<string, string> *> data_pair = {num_keys, data_array};
+
+            mtx_sstablelist.lock();
+            SSTable_list.push_back(new SSTable(data_pair));
+            mtx_sstablelist.unlock();
+
+            delete[] data_array;
+            return ReturnStatus::SUCCESS;
+        }
+        catch (const exception &e)
+        {
+            cerr << "create_SSTable error: " << e.what() << endl;
+            return ReturnStatus::FAILURE;
+        }
+    }
+
+    // read_SSTable reads key/value pairs from the SSTable files in a folder.
+    // Here we assume each file is a text file with key/value pairs separated by DELIMITER.
+    pair<string, string> *read_SSTable(string folder_name, int data_size)
+    {
+        auto *data = new pair<string, string>[data_size];
+        int idx = 0;
+        for (int i = 0;; i++)
+        {
+            string file_name = folder_name + "/" + to_string(i) + ".txt";
+            if (!fs::exists(file_name))
+                break;
+            ifstream file(file_name);
+            if (!file.is_open())
+            {
+                cerr << "Error opening file: " << file_name << endl;
+                continue;
+            }
+            string line;
+            while (getline(file, line))
+            {
+                istringstream iss(line);
+                string key, value;
+                if (getline(iss, key, DELIMITER) && getline(iss, value, DELIMITER))
+                    data[idx++] = {key, value};
+            }
+            file.close();
+        }
+        return data;
+    }
+
+    // mergeSortedSSTables merges two sorted arrays of key/value pairs.
+    // Each array is provided as a pair of (size, pointer to array).
+    pair<int, pair<string, string> *> mergeSortedSSTables(
+        const pair<int, pair<string, string> *> &recent_sstable,
+        const pair<int, pair<string, string> *> &old_sstable)
+    {
+
+        int recent_size = recent_sstable.first;
+        int old_size = old_sstable.first;
+        pair<string, string> *recent_array = recent_sstable.second;
+        pair<string, string> *old_array = old_sstable.second;
+
+        int merged_size = recent_size + old_size;
+        auto *merged_array = new pair<string, string>[merged_size];
+        int i = 0, j = 0, k = 0;
+        while (i < recent_size && j < old_size)
+        {
+            if (recent_array[i].first < old_array[j].first)
+                merged_array[k++] = recent_array[i++];
+            else if (recent_array[i].first > old_array[j].first)
+                merged_array[k++] = old_array[j++];
+            else
+            {
+                merged_array[k++] = recent_array[i++];
+                j++;
             }
         }
-
-        file.close();
-    }
-
-    return data;
-}
-
-pair<int, pair<string, string> *> mergeSortedSSTables(const pair<int, pair<string, string> *> &recent_sstable, const pair<int, pair<string, string> *> &old_sstable)
-{
-    int recent_size = recent_sstable.first;
-    int old_size = old_sstable.first;
-    pair<string, string> *recent_array = recent_sstable.second;
-    pair<string, string> *old_array = old_sstable.second;
-
-    int merged_size = recent_size + old_size;
-    pair<string, string> *merged_array = new pair<string, string>[merged_size];
-
-    int i = 0, j = 0, k = 0;
-
-    while (i < recent_size && j < old_size)
-    {
-        if (recent_array[i].first < old_array[j].first)
-        {
+        while (i < recent_size)
             merged_array[k++] = recent_array[i++];
-        }
-        else if (recent_array[i].first > old_array[j].first)
-        {
+        while (j < old_size)
             merged_array[k++] = old_array[j++];
-        }
-        else
-        {
-            merged_array[k++] = recent_array[i++];
-            j++;
-        }
+
+        auto *resized_array = new pair<string, string>[k];
+        for (int idx = 0; idx < k; ++idx)
+            resized_array[idx] = merged_array[idx];
+        delete[] merged_array;
+        return {k, resized_array};
     }
 
-    while (i < recent_size)
+    // compact attempts to merge adjacent SSTables in the list.
+    void compact()
     {
-        merged_array[k++] = recent_array[i++];
-    }
-
-    while (j < old_size)
-    {
-        merged_array[k++] = old_array[j++];
-    }
-
-    pair<string, string> *resized_array = new pair<string, string>[k];
-    for (int idx = 0; idx < k; ++idx)
-    {
-        resized_array[idx] = merged_array[idx];
-    }
-    delete[] merged_array;
-
-    return {k, resized_array};
-}
-
-void compact()
-{
-    // cout << " Compaction Thread: I am ready to compact!" << endl;
-    while (1)
-    {
-        int ll = -1, rr = -1;
         bool make_compact = false;
+        int ll = -1, rr = -1;
         if (SSTable_list.size() > 1)
         {
             mtx_sstablelist.lock();
-            rr = (int)SSTable_list.size() - 1, ll = rr - 1;
+            rr = (int)SSTable_list.size() - 1;
+            ll = rr - 1;
             if (SSTable_list[rr] == nullptr)
             {
                 SSTable_list.pop_back();
                 if (SSTable_list[ll] == nullptr)
-                {
                     SSTable_list.pop_back();
-                }
             }
             else
             {
@@ -576,12 +573,16 @@ void compact()
         }
         if (make_compact)
         {
-            int num_keys_ll = SSTable_list[ll]->get_num_keys(), num_keys_rr = SSTable_list[rr]->get_num_keys();
-            string folder_name_ll = SSTable_list[ll]->get_folder_name(), folder_name_rr = SSTable_list[rr]->get_folder_name();
+            int num_keys_ll = SSTable_list[ll]->get_num_keys();
+            int num_keys_rr = SSTable_list[rr]->get_num_keys();
+            string folder_name_ll = SSTable_list[ll]->get_folder_name();
+            string folder_name_rr = SSTable_list[rr]->get_folder_name();
+
             pair<string, string> *keyval_ll = read_SSTable(folder_name_ll, num_keys_ll);
             pair<string, string> *keyval_rr = read_SSTable(folder_name_rr, num_keys_rr);
-
-            pair<int, pair<string, string> *> keyval_comp = mergeSortedSSTables(make_pair(num_keys_rr, keyval_rr), make_pair(num_keys_ll, keyval_ll));
+            auto keyval_comp = mergeSortedSSTables(
+                make_pair(num_keys_rr, keyval_rr),
+                make_pair(num_keys_ll, keyval_ll));
 
             delete[] keyval_ll;
             delete[] keyval_rr;
@@ -595,15 +596,17 @@ void compact()
             mtx_sstablelist.unlock();
 
             delete[] keyval_comp.second;
-            keyval_comp.second = nullptr;
         }
-        usleep(comp_time);
     }
-}
 
-void start_compaction()
-{
+    // Background compaction loop: repeatedly calls compact() after a delay.
+    void compaction_loop()
+    {
+        while (true)
+        {
+            compact();
+            usleep(comp_time);
+        }
+    }
+};
 
-    thread compaction_thread(compact);
-    compaction_thread.detach();
-}
