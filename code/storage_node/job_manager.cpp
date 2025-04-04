@@ -16,10 +16,9 @@
 #include <thread>
 #include <vector>
 
-#include <mqueue.h>
-#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
-#include <unistd.h>
+#include <pthread.h>
 
 #include "../db.h"
 
