@@ -45,8 +45,10 @@ public:
                                                       currentLeader(nullopt),
                                                       votesReceived(),
                                                       sentLength(numPeers, 0),
-                                                      ackedLength(numPeers, 0)
+                                                      ackedLength(numPeers, 0),
+                                                      nodes(followers)
     {
+        initState();
     }
 
 private:
@@ -59,4 +61,10 @@ private:
     set<int> votesReceived;
     vector<int> sentLength;
     vector<int> ackedLength;
+    vector<Follower> nodes;
+
+    void initState(){
+        
+    }
 };
+

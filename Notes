@@ -1,2 +1,18 @@
 - think about caching
+- forget about caching
  
+Message format :- (Between Request manager and Job manager)
+query = <REPLICA-ID, vector<REPLICA-ID> followers, operation, key, value>
+
+Message format :- (Between Partition process and Job manager)
+query = <REPLICA-ID, vector<REPLICA-ID> followers, operation, key, value>
+
+
+Table name - string
+Partition ID = HASH-VALUE % M
+REPLICA-ID = <AZ_ID, SLOT_ID>// unique across all replicas (long long)
+
+
+
+RAFT MSG FORMAT :-
+<REPLICA-ID, DEST REPLICA-ID, OPERATION, >
