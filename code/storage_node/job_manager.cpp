@@ -15,18 +15,24 @@
 #include <sys/wait.h>
 #include <thread>
 #include <vector>
-
+#include <map>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <pthread.h>
+#include <unistd.h>
+#include <semaphore.h>
 
 #include "../db.h"
 
 using namespace std;
 
-#define JOB_MANAGER_PORT 7000
-#define MAXLINE 1024
-#define MAX_EVENTS 10
+typedef struct ReplicaAccess
+{
+    RequestToReplica *request_ptr;
+    ReplyFromReplica *reply_ptr;
+    sem_t sem_access;
+    bool is_valid = false;
+} ReplicaAccess;
 
 class JobManager
 {
@@ -59,8 +65,7 @@ public:
 private:
     int listen_fd; // Listening socket file descriptor
 
-    map<string, mqd_t> replica_access; // map of replicas to their respective message queues
-    // We make sure that all communications between the job_manager and a replica_machine happens through its message queue only
+    map<int, ReplicaAccess> replica_map;
 
     // Set a file descriptor to non-blocking mode.
     void set_non_blocking(int fd)
@@ -208,66 +213,221 @@ private:
     }
 
     // Process a client request command and return a response.
-    // The JobManager receives request from the Request Manger of the form
-    // <replica_id> <command>
-    // It then just passes this message to the corresponding message queue of the replica
-    // If a replica is being created for the first time then the message queue is being first created
-    // then stored int the map replica_access for further use
-    ReturnStatus process_request(const string &request)
+    ReturnStatus process_request(const string &request_str)
     {
-        istringstream iss(request);
-        string command, replica_id;
-        iss >> replica_id >> command;
-
-        if (replica_id.empty() || command.empty())
-        {
-            cerr << "Error in JobManager: Incomplete request" << endl;
-            return ReturnStatus::FAILURE;
-        }
-
-        if (command == "CREATE")
+        RequestQuery request = deserializeRequestQuery(request_str);
+        if (request.operation == Operation::CREATE)
         {
             // Create a replica for the first time
-        }
-        else if (command == "SET")
-        {
-        }
-        else if (command == "DEL")
-        {
-        }
-        else if (command == "GET")
-        {
+            replica_map[request.request_replica_id.slot_id].is_valid = false;
+            return create_replica(request.request_replica_id, request.other_replica_id);
         }
         else
         {
-            cerr << "Error in JobManager: Invalid command" << endl;
-            return ReturnStatus::FAILURE;
+            if (replica_map[request.request_replica_id.slot_id].is_valid == false)
+            {
+                return ReturnStatus::FAILURE;
+            }
+            if (request.operation == Operation::SET)
+            {
+                if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
+                {
+                    perror("At JobManager, sem_wait");
+                    return ReturnStatus::FAILURE;
+                }
+
+                replica_map[request.request_replica_id.slot_id].request_ptr->op = Operation::SET;
+                replica_map[request.request_replica_id.slot_id].request_ptr->key_len = static_cast<size_t>((int)request.key.size() + 1);
+                memcpy(replica_map[request.request_replica_id.slot_id].request_ptr->key, request.key.c_str(), replica_map[request.request_replica_id.slot_id].request_ptr->key_len);
+                replica_map[request.request_replica_id.slot_id].request_ptr->val_len = static_cast<size_t>((int)request.value.size() + 1);
+                memcpy(replica_map[request.request_replica_id.slot_id].request_ptr->val, request.value.c_str(), replica_map[request.request_replica_id.slot_id].request_ptr->val_len);
+                if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
+                {
+                    perror("At JobManager, sem_post");
+                    return ReturnStatus::FAILURE;
+                }
+                if (sem_wait(&replica_map[request.request_replica_id.slot_id].reply_ptr->sem) == -1)
+                {
+                    perror("At JobManager, sem_wait");
+                    return ReturnStatus::FAILURE;
+                }
+                ReplyResponse reply;
+                reply.reponse_replica_id = request.request_replica_id;
+                reply.status = static_cast<int>(replica_map[request.request_replica_id.slot_id].reply_ptr->status);
+
+                if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
+                {
+                    perror("At JobManager, sem_post");
+                    return ReturnStatus::FAILURE;
+                }
+
+                return process_reply(reply);
+            }
+            else if (request.operation == Operation::DEL)
+            {
+                if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
+                {
+                    perror("At JobManager, sem_wait");
+                    return ReturnStatus::FAILURE;
+                }
+
+                replica_map[request.request_replica_id.slot_id].request_ptr->op = Operation::DEL;
+                replica_map[request.request_replica_id.slot_id].request_ptr->key_len = static_cast<size_t>((int)request.key.size() + 1);
+                memcpy(replica_map[request.request_replica_id.slot_id].request_ptr->key, request.key.c_str(), replica_map[request.request_replica_id.slot_id].request_ptr->key_len);
+                if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
+                {
+                    perror("At JobManager, sem_post");
+                    return ReturnStatus::FAILURE;
+                }
+                if (sem_wait(&replica_map[request.request_replica_id.slot_id].reply_ptr->sem) == -1)
+                {
+                    perror("At JobManager, sem_wait");
+                    return ReturnStatus::FAILURE;
+                }
+                ReplyResponse reply;
+                reply.reponse_replica_id = request.request_replica_id;
+                reply.status = static_cast<int>(replica_map[request.request_replica_id.slot_id].reply_ptr->status);
+
+                if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
+                {
+                    perror("At JobManager, sem_post");
+                    return ReturnStatus::FAILURE;
+                }
+
+                return process_reply(reply);
+            }
+            else if (request.operation == Operation::GET)
+            {
+                if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
+                {
+                    perror("At JobManager, sem_wait");
+                    return ReturnStatus::FAILURE;
+                }
+
+                replica_map[request.request_replica_id.slot_id].request_ptr->op = Operation::GET;
+                replica_map[request.request_replica_id.slot_id].request_ptr->key_len = static_cast<size_t>((int)request.key.size() + 1);
+                memcpy(replica_map[request.request_replica_id.slot_id].request_ptr->key, request.key.c_str(), replica_map[request.request_replica_id.slot_id].request_ptr->key_len);
+                if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
+                {
+                    perror("At JobManager, sem_post");
+                    return ReturnStatus::FAILURE;
+                }
+                if (sem_wait(&replica_map[request.request_replica_id.slot_id].reply_ptr->sem) == -1)
+                {
+                    perror("At JobManager, sem_wait");
+                    return ReturnStatus::FAILURE;
+                }
+                ReplyResponse reply;
+                reply.reponse_replica_id = request.request_replica_id;
+                reply.status = static_cast<int>(replica_map[request.request_replica_id.slot_id].reply_ptr->status);
+                reply.value.assign(replica_map[request.request_replica_id.slot_id].reply_ptr->val, replica_map[request.request_replica_id.slot_id].reply_ptr->val_len);
+
+                if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
+                {
+                    perror("At JobManager, sem_post");
+                    return ReturnStatus::FAILURE;
+                }
+
+                return process_reply(reply);
+            }
+            else
+            {
+                cerr << "Error in JobManager: Invalid command" << endl;
+                return ReturnStatus::FAILURE;
+            }
         }
         return ReturnStatus::SUCCESS;
     }
 
     // Fork a new process to run the replica machine.
-    string create_replica(const string &replica_id)
+    ReturnStatus create_replica(const ReplicaID own_replica, vector<ReplicaID> &other_replica)
     {
+        if (replica_map.find(own_replica.slot_id) != replica_map.end())
+        {
+            cerr << "Error at JobManager: Replica already present in the AZ" << endl;
+            return ReturnStatus::FAILURE;
+        }
+
+        // Initialize the shared memories and semaphores for the replica
+        string access_str = JOB_REP_SHM_NAME + to_string(own_replica.slot_id);
+
+        int req_shm_fd, rep_shm_fd;
+        if (req_shm_fd = shm_open((access_str + "req").c_str(), O_CREAT | O_RDWR, 0777) == -1)
+        {
+            perror("At JobManager, shm_open");
+            return ReturnStatus::FAILURE;
+        }
+        if (req_shm_fd = shm_open((access_str + "req").c_str(), O_CREAT | O_RDWR, 0777) == -1)
+        {
+            perror("At JobManager, shm_open");
+            return ReturnStatus::FAILURE;
+        }
+
+        if (ftruncate(req_shm_fd, sizeof(RequestToReplica)) == -1)
+        {
+            perror("At JobManager, ftruncate");
+            return ReturnStatus::FAILURE;
+        }
+        if (ftruncate(rep_shm_fd, sizeof(ReplyFromReplica)) == -1)
+        {
+            perror("At JobManager, ftruncate");
+            return ReturnStatus::FAILURE;
+        }
+
+        // Map the shared memory region.
+        void *req_ptr = mmap(nullptr, sizeof(RequestToReplica), PROT_READ | PROT_WRITE, MAP_SHARED, req_shm_fd, 0);
+        if (req_ptr == MAP_FAILED)
+        {
+            perror("At JobManager, mmap");
+            return ReturnStatus::FAILURE;
+        }
+        replica_map[own_replica.slot_id].request_ptr = static_cast<RequestToReplica *>(req_ptr);
+        void *rep_ptr = mmap(nullptr, sizeof(RequestToReplica), PROT_READ | PROT_WRITE, MAP_SHARED, rep_shm_fd, 0);
+        if (rep_ptr == MAP_FAILED)
+        {
+            perror("At JobManager, mmap");
+            return ReturnStatus::FAILURE;
+        }
+        replica_map[own_replica.slot_id].reply_ptr = static_cast<ReplyFromReplica *>(rep_ptr);
+
+        // Initialize the POSIX semaphore for process sharing with an initial value of 1.
+        if (sem_init(&replica_map[own_replica.slot_id].request_ptr->sem, 1, 0) == -1)
+        {
+            perror("At JobManager, sem_init");
+            return ReturnStatus::FAILURE;
+        }
+        if (sem_init(&replica_map[own_replica.slot_id].reply_ptr->sem, 1, 0) == -1)
+        {
+            perror("At JobManager, sem_init");
+            return ReturnStatus::FAILURE;
+        }
+
+        if (sem_init(&replica_map[own_replica.slot_id].sem_access, 1, 1) == -1)
+        {
+            perror("At JobManager, sem_init");
+            return ReturnStatus::FAILURE;
+        }
+
+        // To be send: own_replica, other_replica
         pid_t pid = fork();
         if (pid < 0)
         {
-            perror("fork failed");
-            return "ERROR: Fork failed\r\n";
+            perror("At Jobmanager, fork failed while creating Replica");
+            return ReturnStatus::FAILURE;
         }
         else if (pid == 0)
         {
             // In child process: execute the replica machine executable.
-            execl("./replica_machine", "./replica_machine", replica_id.c_str(), (char *)NULL);
-            perror("execl failed");
+            execl("./replica_machine", "./replica_machine", serializeReplicaID(own_replica).c_str(), serializeReplicaIDVector(other_replica).c_str(), (char *)NULL);
+            perror("At Jobmanager, execl failed");
             exit(EXIT_FAILURE);
         }
-        else
-        {
-            ostringstream oss;
-            oss << "Replica created with PID " << pid << "\r\n";
-            return oss.str();
-        }
+        replica_map[own_replica.slot_id].is_valid = true;
+        return ReturnStatus::SUCCESS;
+    }
+
+    ReturnStatus process_reply(const ReplyResponse &reply)
+    {
     }
 };
 

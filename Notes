@@ -1,5 +1,7 @@
 - think about caching
-- forget about caching
+- think about when one table deletes completely/or even a replica then you have to clean up everything
+- think about the list operation
+
  
 Message format :- (Between Request manager and Job manager)
 query = <REPLICA-ID, vector<REPLICA-ID> followers, operation, key, value>
@@ -16,3 +18,4 @@ REPLICA-ID = <AZ_ID, SLOT_ID>// unique across all replicas (long long)
 
 RAFT MSG FORMAT :-
 <REPLICA-ID, DEST REPLICA-ID, OPERATION, >
+

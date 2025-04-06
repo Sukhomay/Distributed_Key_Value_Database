@@ -474,7 +474,7 @@ private:
 
     // read_SSTable reads key/value pairs from the SSTable files in a folder.
     // Here we assume each file is a text file with key/value pairs separated by DELIMITER.
-    pair<string, string> *read_SSTable(string folder_name, int data_size)
+    pair<string, string> *read_SSTable(string folder_name, int data_size) 
     {
         auto *data = new pair<string, string>[data_size];
         int idx = 0;

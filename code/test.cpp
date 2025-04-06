@@ -1,60 +1,6 @@
-#ifndef DB_H
-#define DB_H
-
-#include <iostream>
-#include <stdexcept>
-#include <sstream>
-#include <vector>
-#include <string>
-#include <iostream>
-#include <sstream>
-#include <string>
-#include <stdexcept>
-#include <unistd.h>
-#include <fcntl.h>
-#include <cstdlib>
-#include <cstdio>
-#include <cstring>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/epoll.h>
-#include <sys/wait.h>
-#include <thread>
-#include <vector>
-#include <map>
-
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <semaphore.h>
-
-using namespace std;
 
 
-#define MAX_STR_SIZE 1024 // Assume this as the maximum size of key or value
-#define JOB_REP_SHM_NAME "/jobmanager_replica_comm"
-#define JOB_MANAGER_PORT 7000
-#define MAXLINE 1024
-#define MAX_EVENTS 10
-
-enum class ReturnStatus
-{
-    FAILURE = 0,
-    SUCCESS = 1
-};
-
-enum Operation
-{
-    CREATE,
-    GET,
-    SET,
-    DEL
-};
-
-// -------------------------------------------------------------------------------
+// Structures as defined.
 typedef struct ReplicaID
 {
     int availability_zone_id;
@@ -69,13 +15,6 @@ typedef struct RequestQuery
     string key;
     string value;
 } RequestQuery;
-
-typedef struct ReplyResponse
-{
-    ReplicaID reponse_replica_id;
-    int status;
-    string value;
-} ReplyResponse;
 
 // ------------------ ReplicaID Serialization ------------------
 
@@ -264,24 +203,48 @@ RequestQuery deserializeRequestQuery(const string &s)
     return rq;
 }
 
-// -------------------------------------------------------------------------------
-typedef struct RequestToReplica
+// ------------------ Test Main ------------------
+
+int main()
 {
-    sem_t sem;
-    Operation op;
-    size_t key_len;
-    char key[MAX_STR_SIZE];
-    size_t val_len;
-    char val[MAX_STR_SIZE];
-} RequestToReplica;
+    try
+    {
+        // Create sample ReplicaID
+        ReplicaID rid = {1, 42};
+        string ser_rid = serializeReplicaID(rid);
+        cout << "Serialized ReplicaID: " << ser_rid << endl;
+        ReplicaID rid2 = deserializeReplicaID(ser_rid);
+        cout << "Deserialized ReplicaID: availability_zone_id = " << rid2.availability_zone_id
+             << ", slot_id = " << rid2.slot_id << endl;
 
-typedef struct ReplyFromReplica
-{
-    sem_t sem;
-    ReturnStatus status;
-    size_t val_len;
-    char val[MAX_STR_SIZE];
-} ReplyFromReplica;
+        // Create sample vector of ReplicaID
+        vector<ReplicaID> rid_vec = {{1, 42}, {2, 84}};
+        string ser_vec = serializeReplicaIDVector(rid_vec);
+        cout << "Serialized ReplicaID Vector: " << ser_vec << endl;
+        vector<ReplicaID> rid_vec2 = deserializeReplicaIDVector(ser_vec);
+        cout << "Deserialized ReplicaID Vector size: " << rid_vec2.size() << endl;
 
-
-#endif // DB_H
+        // Create sample RequestQuery
+        RequestQuery rq;
+        rq.request_replica_id = {3, 7};
+        rq.other_replica_id = rid_vec;
+        rq.operation = 1;
+        rq.key = "sampleKey";
+        rq.value = "sampleValue";
+        string ser_rq = serializeRequestQuery(rq);
+        cout << "Serialized RequestQuery: " << ser_rq << endl;
+        RequestQuery rq2 = deserializeRequestQuery(ser_rq);
+        cout << "Deserialized RequestQuery:" << endl;
+        cout << "  request_replica_id: " << serializeReplicaID(rq2.request_replica_id) << endl;
+        cout << "  other_replica_id size: " << rq2.other_replica_id.size() << endl;
+        cout << "  operation: " << rq2.operation << endl;
+        cout << "  key: " << rq2.key << endl;
+        cout << "  value: " << rq2.value << endl;
+    }
+    catch (const exception &e)
+    {
+        cerr << "Exception: " << e.what() << endl;
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}

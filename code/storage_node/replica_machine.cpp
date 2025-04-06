@@ -7,50 +7,96 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-#include "lsm.h" // External functions: start_compaction(), SET(), GET(), DEL()
+#include <vector>
 
 using namespace std;
 
 #define MAXLINE 1024
 
+#include "lsm.cpp" // External functions: start_compaction(), SET(), GET(), DEL()
+
 class ReplicaMachine
 {
 public:
-    ReplicaMachine(const string &replica_id)
-        : replica_id(replica_id)
+    ReplicaMachine(const ReplicaID _replica_id_, vector<ReplicaID> _other_replica_id_)
+        : replica_id(_replica_id_), other_replica_id(_other_replica_id_)
     {
+        // Setup the shared memories for the replica
+        string access_str = JOB_REP_SHM_NAME + to_string(replica_id.slot_id);
+
+        int req_shm_fd, rep_shm_fd;
+        if (req_shm_fd = shm_open((access_str + "req").c_str(), O_RDWR, 0777) == -1)
+        {
+            perror("At ReplicaMachine, shm_open");
+        }
+        if (req_shm_fd = shm_open((access_str + "req").c_str(), O_RDWR, 0777) == -1)
+        {
+            perror("At ReplicaMachine, shm_open");
+        }
+
+        if (ftruncate(req_shm_fd, sizeof(RequestToReplica)) == -1)
+        {
+            perror("At ReplicaMachine, ftruncate");
+        }
+        if (ftruncate(rep_shm_fd, sizeof(ReplyFromReplica)) == -1)
+        {
+            perror("At ReplicaMachine, ftruncate");
+        }
+
+        // Map the shared memory region.
+        void *req_ptr = mmap(nullptr, sizeof(RequestToReplica), PROT_READ | PROT_WRITE, MAP_SHARED, req_shm_fd, 0);
+        if (req_ptr == MAP_FAILED)
+        {
+            perror("At ReplicaMachine, mmap");
+        }
+        request_ptr = static_cast<RequestToReplica *>(req_ptr);
+        void *rep_ptr = mmap(nullptr, sizeof(RequestToReplica), PROT_READ | PROT_WRITE, MAP_SHARED, rep_shm_fd, 0);
+        if (rep_ptr == MAP_FAILED)
+        {
+            perror("At ReplicaMachine, mmap");
+        }
+        reply_ptr = static_cast<ReplyFromReplica *>(rep_ptr);
+
+        // Set up the LSM Ttree
+        mt = new MergeTree(to_string(replica_id.availability_zone_id) + "_" + to_string(replica_id.slot_id));
     }
 
-    ~ReplicaMachine() {}
+    ~ReplicaMachine() 
+    {
+        delete mt;
+    }
 
     // Start the server loop
     ReturnStatus start()
     {
         try
         {
-            cout << "Replica Machine " << replica_id << " running..." << endl;
+            cout << "Replica Machine (" << replica_id.availability_zone_id << ", " << replica_id.slot_id << ") running..." << endl;
             return run();
         }
         catch (const exception &e)
         {
-            cerr << "Replica " << replica_id << ":: Exception in start(): " << e.what() << endl;
+            cerr << "Replica Machine (" << replica_id.availability_zone_id << ", " << replica_id.slot_id << "):: Exception in start(): " << e.what() << endl;
             throw;
         }
     }
 
 private:
-    string replica_id;
+    ReplicaID replica_id;
+    vector<ReplicaID> other_replica_id;
+    RequestToReplica *request_ptr;
+    ReplyFromReplica *reply_ptr;
+    MergeTree *mt;
 
     // Main event loop (to be implemented)
     ReturnStatus run()
     {
         try
         {
-            MergeTree mt(replica_id);
+            
             while (true)
             {
-
+                
             }
         }
         catch (const std::exception &e)
@@ -69,12 +115,16 @@ int main(int argc, char *argv[])
 {
     try
     {
-        if (argc < 2)
+        if (argc < 3)
         {
-            cerr << "Error at ReplicaMachine: replica_id is empty" << endl;
-            return ReturnStatus::FAILURE;
+            cerr << "Error at ReplicaMachine: not sufficient arguments provided" << endl;
+            return EXIT_FAILURE;
         }
-        ReplicaMachine replica(argv[1]);
+
+        ReplicaID my_replica_id = deserializeReplicaID(argv[1]);
+        vector<ReplicaID> other_replica_id = deserializeReplicaIDVector(argv[2]);
+
+        ReplicaMachine replica(my_replica_id, other_replica_id);
         replica.start();
     }
     catch (const std::exception &e)
