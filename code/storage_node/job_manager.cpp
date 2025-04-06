@@ -37,13 +37,15 @@ typedef struct ReplicaAccess
 class JobManager
 {
 public:
-    JobManager(const int port, const int zone_id) : 
-    listen_fd(-1), JOB_MANAGER_PORT(port), availabililty_zone_id(zone_id) {}
+    JobManager(const int port, const int zone_id) : main_socket_fd(-1), JOB_MANAGER_PORT(port), availabililty_zone_id(zone_id)
+    {
+        replica_map.clear();
+    }
     ~JobManager()
     {
-        if (listen_fd != -1)
+        if (main_socket_fd != -1)
         {
-            close(listen_fd);
+            close(main_socket_fd);
         }
     }
 
@@ -66,7 +68,7 @@ public:
 private:
     const int availabililty_zone_id;
     const int JOB_MANAGER_PORT;
-    int listen_fd; // Listening socket file descriptor
+    int main_socket_fd; // Listening socket file descriptor
 
     map<int, ReplicaAccess> replica_map;
 
@@ -83,13 +85,13 @@ private:
     // Initialize the listening socket.
     void init_server()
     {
-        listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (listen_fd < 0)
+        main_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (main_socket_fd < 0)
             throw runtime_error("ERROR opening socket");
 
         // Allow socket address reuse
         int opt = 1;
-        if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        if (setsockopt(main_socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
             throw runtime_error("setsockopt(SO_REUSEADDR) failed");
 
         struct sockaddr_in serv_addr;
@@ -98,26 +100,28 @@ private:
         serv_addr.sin_addr.s_addr = INADDR_ANY;
         serv_addr.sin_port = htons(JOB_MANAGER_PORT);
 
-        if (bind(listen_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+        if (bind(main_socket_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
             throw runtime_error("ERROR on binding");
-        if (listen(listen_fd, SOMAXCONN) < 0)
+        if (listen(main_socket_fd, SOMAXCONN) < 0)
             throw runtime_error("Listen error");
 
-        set_non_blocking(listen_fd);
+        // set_non_blocking(main_socket_fd);
     }
 
     // Main event loop using epoll to wait for new connection events.
+    // Modified event_loop and handle_client functions
+
     void event_loop()
     {
         int epoll_fd = epoll_create1(0);
         if (epoll_fd < 0)
-            throw runtime_error("epoll_create1 failed");
+            throw std::runtime_error("epoll_create1 failed");
 
         struct epoll_event ev;
         ev.events = EPOLLIN;
-        ev.data.fd = listen_fd;
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &ev) < 0)
-            throw runtime_error("epoll_ctl: listen_fd failed");
+        ev.data.fd = main_socket_fd;
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, main_socket_fd, &ev) < 0)
+            throw std::runtime_error("epoll_ctl: main_socket_fd failed");
 
         struct epoll_event events[MAX_EVENTS];
 
@@ -131,23 +135,90 @@ private:
             }
             for (int i = 0; i < nfds; i++)
             {
-                if (events[i].data.fd == listen_fd)
+                if (events[i].data.fd == main_socket_fd)
                 {
                     // New connection detected on the listening socket.
                     struct sockaddr_in client_addr;
                     socklen_t client_len = sizeof(client_addr);
-                    int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+                    int client_fd = accept(main_socket_fd, (struct sockaddr *)&client_addr, &client_len);
                     if (client_fd < 0)
                     {
                         perror("accept");
                         continue;
                     }
-                    set_non_blocking(client_fd);
-                    cout << "Accepted connection from "
-                         << inet_ntoa(client_addr.sin_addr) << endl;
+                    // set_non_blocking(client_fd);
+                    std::cout << "Accepted connection from "
+                              << inet_ntoa(client_addr.sin_addr) << std::endl;
 
-                    // For each new connection, spawn a thread to handle it.
-                    thread client_thread(&JobManager::handle_client, this, client_fd);
+                    // Create a new dedicated socket for the client.
+                    int dedicated_fd = socket(AF_INET, SOCK_STREAM, 0);
+                    if (dedicated_fd < 0)
+                    {
+                        perror("socket dedicated");
+                        close(client_fd);
+                        continue;
+                    }
+                    int opt = 1;
+                    setsockopt(dedicated_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+                    // Bind to an available port (port 0 lets the OS choose a free port).
+                    struct sockaddr_in dedicated_addr;
+                    memset(&dedicated_addr, 0, sizeof(dedicated_addr));
+                    dedicated_addr.sin_family = AF_INET;
+                    dedicated_addr.sin_addr.s_addr = INADDR_ANY;
+                    dedicated_addr.sin_port = htons(0);
+                    if (bind(dedicated_fd, (struct sockaddr *)&dedicated_addr, sizeof(dedicated_addr)) < 0)
+                    {
+                        perror("bind dedicated socket");
+                        close(client_fd);
+                        close(dedicated_fd);
+                        continue;
+                    }
+
+                    // Retrieve the assigned port.
+                    socklen_t addrlen = sizeof(dedicated_addr);
+                    if (getsockname(dedicated_fd, (struct sockaddr *)&dedicated_addr, &addrlen) < 0)
+                    {
+                        perror("getsockname");
+                        close(client_fd);
+                        close(dedicated_fd);
+                        continue;
+                    }
+                    int new_port = ntohs(dedicated_addr.sin_port);
+
+                    // Send new port info to the client.
+                    std::string port_msg = "CONNECT TO PORT " + std::to_string(new_port);
+                    if (send_all(client_fd, port_msg) == false)
+                    {
+                        perror("send_all() error");
+                        close(client_fd);
+                        close(dedicated_fd);
+                        continue;
+                    }
+
+                    // Wait for OK message from the client.
+                    string ok_buffer;
+                    if (recv_all(client_fd, ok_buffer) == false)
+                    {
+                        close(client_fd);
+                        close(dedicated_fd);
+                        continue;
+                    }
+                    if (ok_buffer != "OK")
+                    {
+                        // No valid OK received; terminate.
+                        close(client_fd);
+                        close(dedicated_fd);
+                        continue;
+                    }
+
+                    cout << ok_buffer << endl;
+
+                    // Close the initial client_fd; further communication will occur on the dedicated socket.
+                    close(client_fd);
+
+                    // Spawn a thread to handle communication on the dedicated socket.
+                    std::thread client_thread(&JobManager::handle_client, this, dedicated_fd);
                     client_thread.detach();
                 }
             }
@@ -155,75 +226,130 @@ private:
         close(epoll_fd);
     }
 
-    // Function to handle client requests in a dedicated thread using epoll.
-    void handle_client(int client_fd)
+    void handle_client(int dedicated_fd)
     {
-        // Create an epoll instance for the client.
-        int client_epoll_fd = epoll_create1(0);
-        if (client_epoll_fd < 0)
+        // Start listening on the dedicated socket.
+        if (listen(dedicated_fd, 1) < 0)
         {
-            perror("epoll_create1 in client");
-            close(client_fd);
-            return;
+            perror("listen dedicated socket");
+            close(dedicated_fd);
         }
-        struct epoll_event ev, events[MAX_EVENTS];
-        ev.events = EPOLLIN | EPOLLET; // Use edge-triggered mode.
-        ev.data.fd = client_fd;
-        if (epoll_ctl(client_epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) < 0)
+
+        // Accept connection on the dedicated socket from the client.
+        struct sockaddr_in client_addr;
+        socklen_t client_addr_len = sizeof(client_addr);
+        int client_fd = accept(dedicated_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+        if (client_fd < 0)
         {
-            perror("epoll_ctl: client_fd");
-            close(client_fd);
-            close(client_epoll_fd);
+            perror("accept on dedicated socket");
+            close(dedicated_fd);
             return;
         }
 
-        char buffer[MAXLINE];
+        close(dedicated_fd);
+
+        // Send READY message to the client.
+        string ready_msg = "READY";
+        if (send_all(client_fd, ready_msg) == false)
+        {
+            perror("send_all() READY message");
+            close(client_fd);
+            return;
+        }
+
+        // Create an epoll instance for the new connection.
+        int epoll_fd = epoll_create1(0);
+        if (epoll_fd < 0)
+        {
+            perror("epoll_create1");
+            close(client_fd);
+            return;
+        }
+
+        struct epoll_event ev, events[MAX_EVENTS];
+        ev.events = EPOLLIN | EPOLLET; // Edge-triggered mode.
+        ev.data.fd = client_fd;
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) < 0)
+        {
+            perror("epoll_ctl: client_fd");
+            close(client_fd);
+            close(epoll_fd);
+            return;
+        }
+
+        bool heartbeat_sent = false;
+        // Communication loop: receive client requests and send heartbeat if necessary.
         while (true)
         {
-            int nfds = epoll_wait(client_epoll_fd, events, MAX_EVENTS, 5000); // 5000ms timeout.
+            int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 5000); // 5000ms timeout.
             if (nfds < 0)
             {
-                perror("epoll_wait client");
+                perror("epoll_wait");
                 break;
             }
             else if (nfds == 0)
             {
-                // Timeout occurred; you could implement a heartbeat or simply continue.
+                cout << "We are sending heartbeats" << endl;
+                // Heartbeat sent for the first time and then no response received against it so we close the connection
+                if (heartbeat_sent)
+                {
+                    break;
+                }
+                // Timeout: send heartbeat to the client.
+                std::string heartbeat = "HEARTBEAT";
+                if (send_all(client_fd, heartbeat) == false)
+                {
+                    perror("send_all() heartbeat");
+                    break;
+                }
                 continue;
             }
-            for (int i = 0; i < nfds; i++)
+            for (int i = 0; i <= nfds; i++)
             {
                 if (events[i].data.fd == client_fd)
                 {
-                    int n = read(client_fd, buffer, MAXLINE - 1);
-                    if (n <= 0)
+                    cout << "Listening to client_fd" << endl;
+                    string request;
+                    if (recv_all(client_fd, request) == false)
                     {
-                        if (n < 0)
-                            perror("read client");
+                        perror("recv_all() from client_fd");
+                        // Either client closed the connection or heartbeat reply timed out.
                         close(client_fd);
-                        close(client_epoll_fd);
+                        close(epoll_fd);
                         return;
                     }
-                    buffer[n] = '\0';
-                    string request(buffer);
-                    string response = process_request(request);
-                    write(client_fd, response.c_str(), response.size());
+                    printRequestQuery(deserializeRequestQuery(request));
+                    if (request == "HEARTBEAT")
+                    {
+                        heartbeat_sent = false;
+                        continue;
+                    }
+                    if (process_request(request, client_fd) == ReturnStatus::FAILURE)
+                    {
+                        cerr << "Could not process request" << endl;
+                        close(client_fd);
+                        close(epoll_fd);
+                        return;
+                    }
                 }
             }
         }
         close(client_fd);
-        close(client_epoll_fd);
+        close(epoll_fd);
     }
 
     // Process a client request command and return a response.
-    ReturnStatus process_request(const string &request_str)
+    ReturnStatus process_request(const string &request_str, int client_fd)
     {
         RequestQuery request = deserializeRequestQuery(request_str);
         if (request.operation == Operation::CREATE)
         {
             // Create a replica for the first time
-            replica_map[request.request_replica_id.slot_id].is_valid = false;
-            return create_replica(request.request_replica_id, request.other_replica_id);
+            ReplyResponse reply;
+            reply.status = static_cast<int>(create_replica(request.request_replica_id, request.other_replica_id));
+            reply.reponse_replica_id = request.request_replica_id;
+            process_reply(reply, client_fd);
+            replica_map[request.request_replica_id.slot_id].is_valid = true;
         }
         else
         {
@@ -231,6 +357,8 @@ private:
             {
                 return ReturnStatus::FAILURE;
             }
+
+            ReplyResponse reply;
             if (request.operation == Operation::SET)
             {
                 if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
@@ -254,7 +382,6 @@ private:
                     perror("At JobManager, sem_wait");
                     return ReturnStatus::FAILURE;
                 }
-                ReplyResponse reply;
                 reply.reponse_replica_id = request.request_replica_id;
                 reply.status = static_cast<int>(replica_map[request.request_replica_id.slot_id].reply_ptr->status);
 
@@ -263,8 +390,6 @@ private:
                     perror("At JobManager, sem_post");
                     return ReturnStatus::FAILURE;
                 }
-
-                return process_reply(reply);
             }
             else if (request.operation == Operation::DEL)
             {
@@ -287,7 +412,6 @@ private:
                     perror("At JobManager, sem_wait");
                     return ReturnStatus::FAILURE;
                 }
-                ReplyResponse reply;
                 reply.reponse_replica_id = request.request_replica_id;
                 reply.status = static_cast<int>(replica_map[request.request_replica_id.slot_id].reply_ptr->status);
 
@@ -296,8 +420,6 @@ private:
                     perror("At JobManager, sem_post");
                     return ReturnStatus::FAILURE;
                 }
-
-                return process_reply(reply);
             }
             else if (request.operation == Operation::GET)
             {
@@ -320,7 +442,6 @@ private:
                     perror("At JobManager, sem_wait");
                     return ReturnStatus::FAILURE;
                 }
-                ReplyResponse reply;
                 reply.reponse_replica_id = request.request_replica_id;
                 reply.status = static_cast<int>(replica_map[request.request_replica_id.slot_id].reply_ptr->status);
                 reply.value.assign(replica_map[request.request_replica_id.slot_id].reply_ptr->val, replica_map[request.request_replica_id.slot_id].reply_ptr->val_len);
@@ -330,14 +451,13 @@ private:
                     perror("At JobManager, sem_post");
                     return ReturnStatus::FAILURE;
                 }
-
-                return process_reply(reply);
             }
             else
             {
                 cerr << "Error in JobManager: Invalid command" << endl;
                 return ReturnStatus::FAILURE;
             }
+            return process_reply(reply, client_fd);
         }
         return ReturnStatus::SUCCESS;
     }
@@ -355,12 +475,12 @@ private:
         string access_str = JOB_REP_SHM_NAME + to_string(own_replica.slot_id);
 
         int req_shm_fd, rep_shm_fd;
-        if (req_shm_fd = shm_open((access_str + "req").c_str(), O_CREAT | O_RDWR, 0777) == -1)
+        if ((req_shm_fd = shm_open((access_str + "req").c_str(), O_CREAT | O_RDWR, 0777)) == -1)
         {
             perror("At JobManager, shm_open");
             return ReturnStatus::FAILURE;
         }
-        if (req_shm_fd = shm_open((access_str + "req").c_str(), O_CREAT | O_RDWR, 0777) == -1)
+        if ((rep_shm_fd = shm_open((access_str + "rep").c_str(), O_CREAT | O_RDWR, 0777)) == -1)
         {
             perror("At JobManager, shm_open");
             return ReturnStatus::FAILURE;
@@ -421,16 +541,22 @@ private:
         else if (pid == 0)
         {
             // In child process: execute the replica machine executable.
-            execl("./replica_machine", "./replica_machine", serializeReplicaID(own_replica).c_str(), serializeReplicaIDVector(other_replica).c_str(), (char *)NULL);
+            execl("./storage_node/replica_machine.out", "./storage_node/replica_machine.out", serializeReplicaID(own_replica).c_str(), serializeReplicaIDVector(other_replica).c_str(), (char *)NULL);
             perror("At Jobmanager, execl failed");
             exit(EXIT_FAILURE);
         }
-        replica_map[own_replica.slot_id].is_valid = true;
         return ReturnStatus::SUCCESS;
     }
 
-    ReturnStatus process_reply(const ReplyResponse &reply)
+    ReturnStatus process_reply(const ReplyResponse &reply, int client_fd)
     {
+        string response = serializeReplyResponse(reply);
+        if (send_all(client_fd, response) == false)
+        {
+            perror("send_all() reponse");
+            return ReturnStatus::FAILURE;
+        }
+        return ReturnStatus::SUCCESS;
     }
 };
 
@@ -438,7 +564,7 @@ int main(int argc, char *argv[])
 {
     try
     {
-        if(argc<3)
+        if (argc < 3)
         {
             cerr << "Error at JobManager: incomplete arguments" << endl;
             return EXIT_FAILURE;

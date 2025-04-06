@@ -24,22 +24,26 @@
 #include <thread>
 #include <vector>
 #include <map>
-
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <semaphore.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string>
+#include <iostream>
 
 using namespace std;
-
 
 #define MAX_STR_SIZE 1024 // Assume this as the maximum size of key or value
 #define JOB_REP_SHM_NAME "/jobmanager_replica_comm"
 #define MAXLINE 1024
 #define MAX_EVENTS 10
 
-enum class ReturnStatus
+enum ReturnStatus
 {
     FAILURE = 0,
     SUCCESS = 1
@@ -75,6 +79,42 @@ typedef struct ReplyResponse
     int status;
     string value;
 } ReplyResponse;
+
+void printReplicaID(const ReplicaID &replica)
+{
+    cout << "ReplicaID {\n"
+         << "  availability_zone_id: " << replica.availability_zone_id << ",\n"
+         << "  slot_id: " << replica.slot_id << "\n"
+         << "}" << endl;
+}
+
+void printRequestQuery(const RequestQuery &req)
+{
+    cout << "RequestQuery {\n";
+    cout << "  request_replica_id: ";
+    printReplicaID(req.request_replica_id);
+    cout << "  other_replica_id: [\n";
+    for (const auto &replica : req.other_replica_id)
+    {
+        cout << "    ";
+        printReplicaID(replica);
+    }
+    cout << "  ],\n";
+    cout << "  operation: " << req.operation << ",\n";
+    cout << "  key: \"" << req.key << "\",\n";
+    cout << "  value: \"" << req.value << "\"\n";
+    cout << "}" << endl;
+}
+
+void printReplyResponse(const ReplyResponse &reply)
+{
+    cout << "ReplyResponse {\n";
+    cout << "  reponse_replica_id: ";
+    printReplicaID(reply.reponse_replica_id);
+    cout << "  status: " << reply.status << ",\n";
+    cout << "  value: \"" << reply.value << "\"\n";
+    cout << "}" << endl;
+}
 
 // ------------------ ReplicaID Serialization ------------------
 
@@ -263,6 +303,58 @@ RequestQuery deserializeRequestQuery(const string &s)
     return rq;
 }
 
+// ------------------ ReplyResponse Serialization ------------------
+
+// Serialize a ReplyResponse using '#' as the field delimiter.
+// Fields are:
+// 1. Serialized reponse_replica_id (using serializeReplicaID)
+// 2. status (as integer)
+// 3. Serialized value (using serializeString)
+string serializeReplyResponse(const ReplyResponse &rr)
+{
+    ostringstream oss;
+    oss << serializeReplicaID(rr.reponse_replica_id);
+    oss << "#" << rr.status;
+    oss << "#" << serializeString(rr.value);
+    return oss.str();
+}
+
+// Deserialize a ReplyResponse from the format above.
+ReplyResponse deserializeReplyResponse(const string &s)
+{
+    ReplyResponse rr;
+    size_t pos = 0;
+    size_t next = s.find('#', pos);
+    if (next == string::npos)
+        throw runtime_error("Invalid ReplyResponse serialization: missing reponse_replica_id field");
+
+    // Field 1: reponse_replica_id
+    string replicaStr = s.substr(pos, next - pos);
+    rr.reponse_replica_id = deserializeReplicaID(replicaStr);
+
+    // Field 2: status
+    pos = next + 1;
+    next = s.find('#', pos);
+    if (next == string::npos)
+        throw runtime_error("Invalid ReplyResponse serialization: missing status field");
+    try
+    {
+        rr.status = stoi(s.substr(pos, next - pos));
+    }
+    catch (...)
+    {
+        throw runtime_error("Invalid ReplyResponse serialization: status conversion error");
+    }
+
+    // Field 3: value (length-prefixed)
+    pos = next + 1;
+    string valueSerialized = s.substr(pos);
+    size_t dummy = 0;
+    rr.value = deserializeString(valueSerialized, dummy);
+
+    return rr;
+}
+
 // -------------------------------------------------------------------------------
 typedef struct RequestToReplica
 {
@@ -282,5 +374,70 @@ typedef struct ReplyFromReplica
     char val[MAX_STR_SIZE];
 } ReplyFromReplica;
 
+// ------------------------------------------------------------------------------------------------------
+
+// Custom send_all function that sends the entire message.
+bool send_all(int sockfd, std::string message, char delimiter = '\n')
+{
+    message.push_back(delimiter);
+    size_t total_sent = 0;
+    size_t message_len = message.size();
+    while (total_sent < message_len)
+    {
+        int sent = send(sockfd, message.data() + total_sent, message_len - total_sent, 0);
+        if (sent < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue; // Retry if interrupted by a signal.
+            }
+            perror("send");
+            message.pop_back();
+            return false;
+        }
+        else if (sent == 0)
+        {
+            // Connection closed unexpectedly.
+            break;
+        }
+        total_sent += sent;
+    }
+    message.pop_back();
+    return total_sent == message_len;
+}
+
+// Custom function to receive data until a delimiter is found.
+// The result is stored in the provided string reference.
+// Returns true if the delimiter was found and data received successfully, false otherwise.
+bool recv_all(int sockfd, std::string &result, char delimiter = '\n')
+{
+    result.clear();
+    char buffer[512];
+    while (true)
+    {
+        int recvd = recv(sockfd, buffer, sizeof(buffer), 0);
+        if (recvd < 0)
+        {
+            if (errno == EINTR)
+                continue; // Retry if interrupted by a signal.
+            perror("recv");
+            return false;
+        }
+        else if (recvd == 0)
+        {
+            // Connection closed before delimiter was found.
+            std::cerr << "Connection closed before receiving the complete message." << std::endl;
+            return false;
+        }
+        result.append(buffer, recvd);
+        // If the delimiter is found, stop reading.
+        if (result.find(delimiter) != std::string::npos)
+        {
+            result.pop_back();
+            break;
+        }
+    }
+    return true;
+}
 
 #endif // DB_H
