@@ -11,8 +11,6 @@
 
 using namespace std;
 
-#define MAXLINE 1024
-
 #include "lsm.cpp" // External functions: start_compaction(), SET(), GET(), DEL()
 
 class ReplicaMachine
@@ -25,11 +23,11 @@ public:
         string access_str = JOB_REP_SHM_NAME + to_string(replica_id.slot_id);
 
         int req_shm_fd, rep_shm_fd;
-        if (req_shm_fd = shm_open((access_str + "req").c_str(), O_RDWR, 0777) == -1)
+        if ((req_shm_fd = shm_open((access_str + "req").c_str(), O_RDWR, 0777)) == -1)
         {
             perror("At ReplicaMachine, shm_open");
         }
-        if (req_shm_fd = shm_open((access_str + "req").c_str(), O_RDWR, 0777) == -1)
+        if ((rep_shm_fd = shm_open((access_str + "rep").c_str(), O_RDWR, 0777)) == -1)
         {
             perror("At ReplicaMachine, shm_open");
         }

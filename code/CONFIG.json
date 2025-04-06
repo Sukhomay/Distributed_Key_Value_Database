@@ -1,0 +1,23 @@
+{
+  "nodes": [
+    {
+      "type": "request_manager",
+      "id": "rm-001",
+      "host": "192.168.1.10",
+      "port": 8000,
+      "max_connections": 5000
+    },
+    {
+      "type": "availability_zone",
+      "id": "0",
+      "region": "us-east-1",
+      "datacenter": "dc-01",
+      "state": "1",
+      "rcu_capacity": "3000",
+      "wcu_capacity": "1000",
+      "storage_capacity": "10000000",
+      "host": "127.0.0.1",
+      "port": "7000"
+    }
+  ]
+}

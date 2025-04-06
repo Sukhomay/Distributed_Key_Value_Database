@@ -17,10 +17,10 @@ namespace fs = std::filesystem;
 
 
 const char DELIMITER = '#';
-const string TOMBSTONE = "tombstone";
-const int MAX_FILE_SIZE = 4096;
-const int INDEX_SIZE = 512;
-const int MAX_COMP_TIME = 100000;
+const string TOMBSTONE = "TOMBSTONE";
+const int MAX_FILE_SIZE = 16;
+const int INDEX_SIZE = 4;  // Maximum pairs per file
+const int MAX_COMP_TIME = 10;
 const int MIN_COMP_TIME = 1;
 
 // Max AVL Tree size in memory 
