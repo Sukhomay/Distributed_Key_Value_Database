@@ -16,7 +16,6 @@ using namespace std;
 namespace fs = std::filesystem;
 
 
-
 const char DELIMITER = '#';
 const string TOMBSTONE = "tombstone";
 const int MAX_FILE_SIZE = 4096;

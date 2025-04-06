@@ -36,7 +36,6 @@ using namespace std;
 
 #define MAX_STR_SIZE 1024 // Assume this as the maximum size of key or value
 #define JOB_REP_SHM_NAME "/jobmanager_replica_comm"
-#define JOB_MANAGER_PORT 7000
 #define MAXLINE 1024
 #define MAX_EVENTS 10
 

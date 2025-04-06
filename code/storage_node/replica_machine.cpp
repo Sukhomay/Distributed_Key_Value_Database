@@ -61,13 +61,13 @@ public:
         mt = new MergeTree(to_string(replica_id.availability_zone_id) + "_" + to_string(replica_id.slot_id));
     }
 
-    ~ReplicaMachine() 
+    ~ReplicaMachine()
     {
         delete mt;
     }
 
     // Start the server loop
-    ReturnStatus start()
+    int start()
     {
         try
         {
@@ -89,23 +89,68 @@ private:
     MergeTree *mt;
 
     // Main event loop (to be implemented)
-    ReturnStatus run()
+    int run()
     {
-        try
+        while (true)
         {
-            
-            while (true)
+            // wait for the request to come
+            if (sem_wait(&(request_ptr->sem)) == -1)
             {
+                perror("At ReplicaMachine, sem_wait");
+                return EXIT_FAILURE;
+            }
+            // Attend the request and respond accordingly;
+            if (request_ptr->op == Operation::SET)
+            {
+                string key(request_ptr->key, request_ptr->key_len);
+                string val(request_ptr->val, request_ptr->val_len);
+
+                ReturnStatus status = mt->SET(key, val);
                 
+                reply_ptr->status = status;
+                if(sem_post(&(reply_ptr->sem)) == -1)
+                {
+                    perror("At ReplicaMachine, sem_postt");
+                    return EXIT_FAILURE;
+                }
+
+            }
+            else if (request_ptr->op == Operation::DEL)
+            {
+                string key(request_ptr->key, request_ptr->key_len);
+                
+                ReturnStatus status = mt->DEL(key);
+
+                reply_ptr->status = status;
+                if(sem_post(&(reply_ptr->sem)) == -1)
+                {
+                    perror("At ReplicaMachine, sem_postt");
+                    return EXIT_FAILURE;
+                }
+            }
+            else if (request_ptr->op == Operation::GET)
+            {
+                string key(request_ptr->key, request_ptr->key_len);
+                
+                pair<ReturnStatus, string> result = mt->GET(key);
+
+                reply_ptr->status = result.first;
+                reply_ptr->val_len = static_cast<size_t>((int)result.second.size() + 1);
+                memcpy(reply_ptr->val, result.second.c_str(), reply_ptr->val_len);
+                if(sem_post(&(reply_ptr->sem)) == -1)
+                {
+                    perror("At ReplicaMachine, sem_postt");
+                    return EXIT_FAILURE;
+                }
+
+            }
+            else
+            {
+                cerr << "Invalid Operation at ReplicaMachine" << endl;
+                return EXIT_FAILURE;
             }
         }
-        catch (const std::exception &e)
-        {
-            std::cerr << e.what() << '\n';
-            throw;
-            return ReturnStatus::FAILURE;
-        }
-        return ReturnStatus::SUCCESS;
+        return EXIT_SUCCESS;
     }
 };
 
@@ -125,7 +170,7 @@ int main(int argc, char *argv[])
         vector<ReplicaID> other_replica_id = deserializeReplicaIDVector(argv[2]);
 
         ReplicaMachine replica(my_replica_id, other_replica_id);
-        replica.start();
+        return replica.start();
     }
     catch (const std::exception &e)
     {

@@ -37,7 +37,8 @@ typedef struct ReplicaAccess
 class JobManager
 {
 public:
-    JobManager() : listen_fd(-1) {}
+    JobManager(const int port, const int zone_id) : 
+    listen_fd(-1), JOB_MANAGER_PORT(port), availabililty_zone_id(zone_id) {}
     ~JobManager()
     {
         if (listen_fd != -1)
@@ -52,7 +53,7 @@ public:
         try
         {
             init_server();
-            cout << "JobManager listening on port " << JOB_MANAGER_PORT << endl;
+            cout << "JobManager for AZ" << availabililty_zone_id << " listening on port " << JOB_MANAGER_PORT << endl;
             event_loop();
         }
         catch (const exception &e)
@@ -63,6 +64,8 @@ public:
     }
 
 private:
+    const int availabililty_zone_id;
+    const int JOB_MANAGER_PORT;
     int listen_fd; // Listening socket file descriptor
 
     map<int, ReplicaAccess> replica_map;
@@ -431,11 +434,19 @@ private:
     }
 };
 
-int main()
+int main(int argc, char *argv[])
 {
     try
     {
-        JobManager manager;
+        if(argc<3)
+        {
+            cerr << "Error at JobManager: incomplete arguments" << endl;
+            return EXIT_FAILURE;
+        }
+
+        int availability_zone_id = stoi(argv[1]);
+        int port = stoi(argv[2]);
+        JobManager manager(port, availability_zone_id);
         manager.run();
     }
     catch (const exception &e)

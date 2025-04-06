@@ -19,3 +19,7 @@ REPLICA-ID = <AZ_ID, SLOT_ID>// unique across all replicas (long long)
 RAFT MSG FORMAT :-
 <REPLICA-ID, DEST REPLICA-ID, OPERATION, >
 
+
+
+Tasks for Sukhomay:
+    - make the avl tree in a file

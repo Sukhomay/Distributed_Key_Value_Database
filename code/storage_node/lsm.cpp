@@ -180,15 +180,7 @@ private:
 public:
     SSTable(const pair<int, pair<string, string> *> &data = {0, nullptr}, string fname = TOMBSTONE)
     {
-        if (fname == TOMBSTONE)
-        {
-            int idx = SSTable_list.size();
-            folder_name = top_dir + "SSTable_" + to_string(idx);
-        }
-        else
-        {
-            folder_name = fname;
-        }
+        folder_name = fname;
         createFolder(folder_name);
 
         // Extract the size and the data pointer
@@ -459,7 +451,9 @@ private:
             pair<int, pair<string, string> *> data_pair = {num_keys, data_array};
 
             mtx_sstablelist.lock();
-            SSTable_list.push_back(new SSTable(data_pair));
+            int nidx = SSTable_list.size();
+            string folder_name = top_dir + "SSTable_" + to_string(nidx);
+            SSTable_list.push_back(new SSTable(data_pair, folder_name));
             mtx_sstablelist.unlock();
 
             delete[] data_array;
