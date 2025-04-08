@@ -12,11 +12,12 @@
 using namespace std;
 
 #include "raft_module.cpp" // External functions : print(), onReceiveRaftQuery(), broadcastMessage
+
 class ReplicaMachine
 {
 public:
-    ReplicaMachine(const ReplicaID _replica_id_, vector<ReplicaID> _other_replica_id_)
-        : replica_id(_replica_id_), other_replica_id(_other_replica_id_)
+    ReplicaMachine(const ReplicaID _replica_id_, vector<ReplicaID> _sibling_replica_id_)
+        : replica_id(_replica_id_), sibling_replica_id(_sibling_replica_id_)
     {
         // Setup the shared memories for the replica
         string access_str = JOB_REP_SHM_NAME + to_string(replica_id.slot_id);
@@ -55,7 +56,7 @@ public:
         reply_ptr = static_cast<ReplyFromReplica *>(rep_ptr);
 
         // Set up the LSM Ttree
-        raft_machine = new Raft(replica_id, other_replica_id.size() + 1, other_replica_id, request_ptr, reply_ptr);
+        raft_machine = new Raft(replica_id, sibling_replica_id.size() + 1, sibling_replica_id, request_ptr, reply_ptr);
     }
 
     ~ReplicaMachine()
@@ -80,7 +81,7 @@ public:
 
 private:
     ReplicaID replica_id;
-    vector<ReplicaID> other_replica_id;
+    vector<ReplicaID> sibling_replica_id;
     RequestToReplica *request_ptr;
     ReplyFromReplica *reply_ptr;
     Raft *raft_machine;
@@ -95,14 +96,7 @@ private:
                 perror("At ReplicaMachine, sem_wait");
                 return EXIT_FAILURE;
             }
-            if (request_ptr->op == Operation::RAFT)
-            {
-                raft_machine->onReceiveRaftQuery(request_ptr->raft_query);
-            }
-            else
-            {
-                raft_machine->onReceiveBroadcastMessage(*request_ptr);
-            }
+            raft_machine->onReceiveBroadcastMessage(request_ptr->request);
         }
         return EXIT_SUCCESS;
     }
@@ -120,10 +114,10 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        ReplicaID my_replica_id = deserializeReplicaID(argv[1]);
-        vector<ReplicaID> other_replica_id = deserializeReplicaIDVector(argv[2]);
+        ReplicaID my_replica_id = ReplicaID::deserialize(argv[1]);
+        vector<ReplicaID> sibling_replica_id = SiblingReplica::deserialize(argv[2]).replicas;
 
-        ReplicaMachine replica(my_replica_id, other_replica_id);
+        ReplicaMachine replica(my_replica_id, sibling_replica_id);
         return replica.start();
     }
     catch (const std::exception &e)

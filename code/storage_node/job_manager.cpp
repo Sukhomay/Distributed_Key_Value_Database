@@ -42,7 +42,7 @@ public:
         replica_map.clear();
     }
     ~JobManager()
-    {
+    { 
         if (main_socket_fd != -1)
         {
             close(main_socket_fd);
@@ -69,7 +69,6 @@ private:
     const int availabililty_zone_id;
     const int JOB_MANAGER_PORT;
     int main_socket_fd; // Listening socket file descriptor
-
     map<int, ReplicaAccess> replica_map;
 
     // Set a file descriptor to non-blocking mode.
@@ -110,7 +109,6 @@ private:
 
     // Main event loop using epoll to wait for new connection events.
     // Modified event_loop and handle_client functions
-
     void event_loop()
     {
         int epoll_fd = epoll_create1(0);
@@ -293,7 +291,7 @@ private:
                     break;
                 }
                 // Timeout: send heartbeat to the client.
-                std::string heartbeat = "HEARTBEAT";
+                std::string heartbeat = HEARTBEAT_MSSG;
                 if (send_all(client_fd, heartbeat) == false)
                 {
                     perror("send_all() heartbeat");
@@ -314,8 +312,7 @@ private:
                         close(epoll_fd);
                         return;
                     }
-                    printRequestQuery(deserializeRequestQuery(request));
-                    if (request == "HEARTBEAT")
+                    if (request == HEARTBEAT_MSSG)
                     {
                         heartbeat_sent = false;
                         continue;
@@ -337,13 +334,17 @@ private:
     // Process a client request command and return a response.
     ReturnStatus process_request(const string &request_str, int client_fd)
     {
-        RequestQuery request = deserializeRequestQuery(request_str);
-        if (request.operation == Operation::CREATE)
+        RequestQuery request = RequestQuery::deserialize(request_str);
+        if (request.operation == Operation::CREATE_PROPAGATE)
+        {
+        }
+        else if (request.operation == Operation::CREATE)
         {
             // Create a replica for the first time
             ReplyResponse reply;
-            reply.status = static_cast<int>(create_replica(request.request_replica_id, request.other_replica_id));
+            reply.status = create_replica(request.request_replica_id, request.sibling_replica_id);
             reply.reponse_replica_id = request.request_replica_id;
+            reply.request_id = request.request_id;
             process_reply(reply, client_fd);
             replica_map[request.request_replica_id.slot_id].is_valid = true;
         }
@@ -354,136 +355,43 @@ private:
                 return ReturnStatus::FAILURE;
             }
 
-            replica_map[request.request_replica_id.slot_id].request_ptr->reset();
-
+            replica_map[request.request_replica_id.slot_id].request_ptr->request.reset();
             ReplyResponse reply;
-            if (request.operation == Operation::SET)
+
+            if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
             {
-                if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
-                {
-                    perror("At JobManager, sem_wait");
-                    return ReturnStatus::FAILURE;
-                }
-
-                replica_map[request.request_replica_id.slot_id].request_ptr->op = Operation::SET;
-                replica_map[request.request_replica_id.slot_id].request_ptr->key_len = static_cast<size_t>((int)request.key.size() + 1);
-                memcpy(replica_map[request.request_replica_id.slot_id].request_ptr->key, request.key.c_str(), replica_map[request.request_replica_id.slot_id].request_ptr->key_len);
-                replica_map[request.request_replica_id.slot_id].request_ptr->val_len = static_cast<size_t>((int)request.value.size() + 1);
-                memcpy(replica_map[request.request_replica_id.slot_id].request_ptr->val, request.value.c_str(), replica_map[request.request_replica_id.slot_id].request_ptr->val_len);
-                if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
-                {
-                    perror("At JobManager, sem_post");
-                    return ReturnStatus::FAILURE;
-                }
-                if (sem_wait(&replica_map[request.request_replica_id.slot_id].reply_ptr->sem) == -1)
-                {
-                    perror("At JobManager, sem_wait");
-                    return ReturnStatus::FAILURE;
-                }
-                reply.reponse_replica_id = request.request_replica_id;
-                reply.status = static_cast<int>(replica_map[request.request_replica_id.slot_id].reply_ptr->status);
-
-                if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
-                {
-                    perror("At JobManager, sem_post");
-                    return ReturnStatus::FAILURE;
-                }
-            }
-            else if (request.operation == Operation::DEL)
-            {
-                if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
-                {
-                    perror("At JobManager, sem_wait");
-                    return ReturnStatus::FAILURE;
-                }
-
-                replica_map[request.request_replica_id.slot_id].request_ptr->op = Operation::DEL;
-                replica_map[request.request_replica_id.slot_id].request_ptr->key_len = static_cast<size_t>((int)request.key.size() + 1);
-                memcpy(replica_map[request.request_replica_id.slot_id].request_ptr->key, request.key.c_str(), replica_map[request.request_replica_id.slot_id].request_ptr->key_len);
-                if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
-                {
-                    perror("At JobManager, sem_post");
-                    return ReturnStatus::FAILURE;
-                }
-                if (sem_wait(&replica_map[request.request_replica_id.slot_id].reply_ptr->sem) == -1)
-                {
-                    perror("At JobManager, sem_wait");
-                    return ReturnStatus::FAILURE;
-                }
-                reply.reponse_replica_id = request.request_replica_id;
-                reply.status = static_cast<int>(replica_map[request.request_replica_id.slot_id].reply_ptr->status);
-
-                if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
-                {
-                    perror("At JobManager, sem_post");
-                    return ReturnStatus::FAILURE;
-                }
-            }
-            else if (request.operation == Operation::GET)
-            {
-                if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
-                {
-                    perror("At JobManager, sem_wait");
-                    return ReturnStatus::FAILURE;
-                }
-
-                replica_map[request.request_replica_id.slot_id].request_ptr->op = Operation::GET;
-                replica_map[request.request_replica_id.slot_id].request_ptr->key_len = static_cast<size_t>((int)request.key.size() + 1);
-                memcpy(replica_map[request.request_replica_id.slot_id].request_ptr->key, request.key.c_str(), replica_map[request.request_replica_id.slot_id].request_ptr->key_len);
-                if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
-                {
-                    perror("At JobManager, sem_post");
-                    return ReturnStatus::FAILURE;
-                }
-                if (sem_wait(&replica_map[request.request_replica_id.slot_id].reply_ptr->sem) == -1)
-                {
-                    perror("At JobManager, sem_wait");
-                    return ReturnStatus::FAILURE;
-                }
-                reply.reponse_replica_id = request.request_replica_id;
-                reply.status = static_cast<int>(replica_map[request.request_replica_id.slot_id].reply_ptr->status);
-                reply.value.assign(replica_map[request.request_replica_id.slot_id].reply_ptr->val, replica_map[request.request_replica_id.slot_id].reply_ptr->val_len);
-
-                if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
-                {
-                    perror("At JobManager, sem_post");
-                    return ReturnStatus::FAILURE;
-                }
-            }
-            else if (request.operation == Operation::RAFT)
-            {
-                if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
-                {
-                    perror("At JobManager, sem_wait");
-                    return ReturnStatus::FAILURE;
-                }
-
-                replica_map[request.request_replica_id.slot_id].request_ptr->op = Operation::RAFT;
-                replica_map[request.request_replica_id.slot_id].request_ptr->raft_query = request.raft_request;
-                if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
-                {
-                    perror("At JobManager, sem_post");
-                    return ReturnStatus::FAILURE;
-                }
-                
-                if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
-                {
-                    perror("At JobManager, sem_post");
-                    return ReturnStatus::FAILURE;
-                }
-            }
-            else
-            {
-                cerr << "Error in JobManager: Invalid command" << endl;
+                perror("At JobManager, sem_wait");
                 return ReturnStatus::FAILURE;
             }
+
+            replica_map[request.request_replica_id.slot_id].request_ptr->request = request;
+
+            if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
+            {
+                perror("At JobManager, sem_post");
+                return ReturnStatus::FAILURE;
+            }
+            if (sem_wait(&replica_map[request.request_replica_id.slot_id].reply_ptr->sem) == -1)
+            {
+                perror("At JobManager, sem_wait");
+                return ReturnStatus::FAILURE;
+            }
+
+            reply = replica_map[request.request_replica_id.slot_id].reply_ptr->reply;
+
+            if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
+            {
+                perror("At JobManager, sem_post");
+                return ReturnStatus::FAILURE;
+            }
+
             return process_reply(reply, client_fd);
         }
         return ReturnStatus::SUCCESS;
     }
 
     // Fork a new process to run the replica machine.
-    ReturnStatus create_replica(const ReplicaID own_replica, vector<ReplicaID> &other_replica)
+    ReturnStatus create_replica(const ReplicaID own_replica, vector<ReplicaID> &req_sibling_replica)
     {
         if (replica_map.find(own_replica.slot_id) != replica_map.end())
         {
@@ -551,7 +459,7 @@ private:
             return ReturnStatus::FAILURE;
         }
 
-        // To be send: own_replica, other_replica
+        // To be send: own_replica, sibling_replica
         pid_t pid = fork();
         if (pid < 0)
         {
@@ -561,7 +469,9 @@ private:
         else if (pid == 0)
         {
             // In child process: execute the replica machine executable.
-            execl("./storage_node/replica_machine.out", "./storage_node/replica_machine.out", serializeReplicaID(own_replica).c_str(), serializeReplicaIDVector(other_replica).c_str(), (char *)NULL);
+            SiblingReplica sibling_replica;
+            sibling_replica.replicas = req_sibling_replica;
+            execl("./storage_node/replica_machine.out", "./storage_node/replica_machine.out", own_replica.serialize().c_str(), sibling_replica.serialize().c_str(), (char *)NULL);
             perror("At Jobmanager, execl failed");
             exit(EXIT_FAILURE);
         }
@@ -570,7 +480,7 @@ private:
 
     ReturnStatus process_reply(const ReplyResponse &reply, int client_fd)
     {
-        string response = serializeReplyResponse(reply);
+        string response = reply.serialize();
         if (send_all(client_fd, response) == false)
         {
             perror("send_all() reponse");

@@ -190,8 +190,8 @@ int main()
     RequestQuery req;
     req.operation = Operation::CREATE;
     req.request_replica_id = ReplicaID{0, 3};
-    req.other_replica_id.push_back(ReplicaID{1, 4});
-    req.other_replica_id.push_back(ReplicaID{2, 5});
+    req.sibling_replica_id.push_back(ReplicaID{1, 4});
+    req.sibling_replica_id.push_back(ReplicaID{2, 5});
 
     printRequestQuery(req);
     send_all(sockfd, serializeRequestQuery(req));

@@ -4,7 +4,7 @@
 class Raft
 {
 public:
-    Raft(ReplicaID self, int numPeers, vector<ReplicaID> &peers, RequestToReplica *request_ptr_, ReplyFromReplica *reply_ptr_)
+    Raft(ReplicaID self, int numPeers, vector<ReplicaID> &peers, ReplyFromReplica *reply_ptr_)
         : nodeId(self),
           numPeers(numPeers),
           currentTerm(0),
@@ -16,7 +16,6 @@ public:
           sentLength(numPeers, 0),
           ackedLength(numPeers, 0),
           nodes(peers),
-          request_ptr(request_ptr_),
           reply_ptr(reply_ptr_)
     {
         initState();
@@ -36,7 +35,7 @@ public:
             int sockfd = socket(AF_INET, SOCK_STREAM, 0);
             if (sockfd < 0)
             {
-                cerr << "Socket creation failed for peer " << serializeReplicaID(peers[i]) << endl;
+                cerr << "Socket creation failed for peer " << peers[i].serialize() << endl;
                 continue;
             }
 
@@ -47,15 +46,14 @@ public:
             serv_addr.sin_port = htons(port);
             if (inet_pton(AF_INET, ip.c_str(), &serv_addr.sin_addr) <= 0)
             {
-                cerr << "Invalid address for peer " << serializeReplicaID(peers[i]) << endl;
+                cerr << "Invalid address for peer " << peers[i].serialize() << endl;
                 close(sockfd);
                 continue;
             }
-
             // Connect to the peer.
             if (connect(sockfd, (sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
             {
-                cerr << "Connection failed for peer " << serializeReplicaID(peers[i]) << endl;
+                cerr << "Connection failed for peer " << peers[i].serialize() << endl;
                 close(sockfd);
                 continue;
             }
@@ -64,7 +62,7 @@ public:
             sockfds[peers[i]] = sockfd;
         }
     }
-    
+
     ~Raft()
     {
         // Will implement later
@@ -76,14 +74,14 @@ public:
         cout << "======== Raft State ========" << endl;
         cout << "numPeers       : " << numPeers << endl;
         cout << "currentTerm    : " << currentTerm << endl;
-        cout << "votedFor       : " << votedFor << endl;
+        cout << "votedFor       : " << votedFor.serialize() << endl;
         cout << "commitLength   : " << commitLength << endl;
         cout << "currentRole    : " << roleToString(currentRole) << endl;
-        cout << "currentLeader  : " << currentLeader << endl;
+        cout << "currentLeader  : " << currentLeader.serialize() << endl;
 
         cout << "votesReceived  : { ";
         for (ReplicaID vote : votesReceived)
-            cout << vote << " ";
+            cout << vote.serialize() << " ";
         cout << "}" << endl;
 
         cout << "sentLength     : [ ";
@@ -149,7 +147,7 @@ public:
 
     void onReceiveBroadcastMessage(RequestToReplica &request)
     {
-        cout << "Let's Broadcast message : " << operationToString(request.op) << endl;
+        cout << "Let's Broadcast message : " << operationToString(request.request.operation) << endl;
         // if (request.op == Operation::CREATE)
         // {
         //     for (auto &&node : nodes)
@@ -160,23 +158,22 @@ public:
         //         query.key = string(request.key, request.key_len);
         //         query.value = string(request.val, request.val_len);
         //         query.raft_request.reset();
-        //         query.other_replica_id.clear();
-                
-                
+        //         query.sibling_replica_id.clear();
+
         //     }
         //     return;
         // }
         std::lock_guard<std::mutex> lock(mtx);
         LogMessage logmsg;
-        logmsg.op = request.op;
-        logmsg.key = string(request.key, request.key_len);
-        logmsg.value = string(request.val, request.val_len);
+        logmsg.op = request.request.operation;
+        logmsg.key = string(request.request.key, request.request.key_len);
+        logmsg.value = string(request.request.value, request.request.value_len);
         logmsg.replicaID = nodeId;
         logmsg.localTime = getCurrentLocalTime();
         if (currentRole == LEADER)
         {
             // Append the record to log
-            log.emplace_back(LogEntry(currentTerm, formatLogMessage(logmsg)));
+            log.emplace_back(LogEntry(currentTerm, logmsg.format()));
 
             // Acknowledge for self
             ackedLength[nodeId.slot_id] = log.size();
@@ -197,23 +194,23 @@ public:
             //           << "LeaderID: " << currentLeader;
 
             // TODO: Implement actual message forwarding over network
-            RequestQuery query;
-            query.request_replica_id = currentLeader;
-            query.operation = request.op;
-            query.key = string(request.key, request.key_len);
-            query.value = string(request.val, request.val_len);
-            query.raft_request.reset();
-            query.other_replica_id.clear();
+            RequestQuery query = request.request;
+            // query.request_replica_id = currentLeader;
+            // query.operation = request.request.operation;
+            // query.key = string(request.request.key, request.request.key_len);
+            // query.value = string(request.request.value, request.request.value_len);
+            // query.raft_request.reset();
+            // query.sibling_replica_id.clear();
             for (auto &&i : nodes)
             {
                 if (i != currentLeader)
                 {
-                    query.other_replica_id.push_back(i);
+                    query.sibling_replica_id.push_back(i);
                 }
             }
-            query.other_replica_id.push_back(nodeId);
-            cout << "Sending request to Leader : " << printReplicaID(currentLeader) << endl;
-            send_all(sockfds[currentLeader], serializeRequestQuery(query));
+            query.sibling_replica_id.push_back(nodeId);
+            cout << "Sending request to Leader : "; currentLeader.print(); cout << endl;
+            send_all(sockfds[currentLeader], query.serialize());
         }
     }
 
@@ -237,6 +234,7 @@ private:
     map<ReplicaID, int> sockfds;
     RequestToReplica *request_ptr;
     ReplyFromReplica *reply_ptr;
+    map<ReplicaID, Address> ;
 
     bool sendRaftQuery(RaftQuery &request, const ReplicaID &destination)
     {
@@ -244,7 +242,7 @@ private:
         // Properly populate the string
         RequestQuery requestQuery;
         requestQuery.request_replica_id = nodeId;
-        requestQuery.other_replica_id.clear();
+        requestQuery.sibling_replica_id.clear();
         requestQuery.operation = RAFT;
         requestQuery.key = requestQuery.value = "";
         requestQuery.raft_request = request;
