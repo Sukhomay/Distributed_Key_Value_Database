@@ -4,9 +4,11 @@
 #include <iostream>
 #include <stdexcept>
 #include <sstream>
+#include <utility>
 #include <vector>
 #include <string>
 #include <iostream>
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <stdexcept>
@@ -23,6 +25,7 @@
 #include <sys/wait.h>
 #include <thread>
 #include <vector>
+#include <set>
 #include <map>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -35,6 +38,12 @@
 #include <errno.h>
 #include <string>
 #include <iostream>
+#include <thread>
+#include <chrono>
+#include <mutex>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 
 using namespace std;
 
@@ -42,19 +51,36 @@ using namespace std;
 #define JOB_REP_SHM_NAME "/jobmanager_replica_comm"
 #define MAXLINE 1024
 #define MAX_EVENTS 10
-
+const string FIELD_DELIM = "#";
+const string LIST_DELIM = "##";
+#define nullValue -1
+#define nullReplica ReplicaID{-1, -1}
 enum ReturnStatus
 {
     FAILURE = 0,
     SUCCESS = 1
 };
 
+enum Role
+{
+    FOLLOWER,
+    CANDIDATE,
+    LEADER
+};
 enum Operation
 {
-    CREATE,
     GET,
     SET,
-    DEL
+    DEL,
+    CREATE,
+    RAFT
+};
+enum Message
+{
+    VoteRequest,
+    VoteResponse,
+    LogRequest,
+    LogResponse
 };
 
 // -------------------------------------------------------------------------------
@@ -62,7 +88,49 @@ typedef struct ReplicaID
 {
     int availability_zone_id;
     int slot_id;
+    friend istream &operator>>(istream &is, ReplicaID &replica)
+    {
+        is >> replica.availability_zone_id >> replica.slot_id;
+        return is;
+    }
+    friend ostream &operator<<(ostream &os, const ReplicaID &replica)
+    {
+        os << "ReplicaID : " << replica.availability_zone_id << " " << replica.slot_id << endl;
+        return os;
+    }
+    bool operator==(const ReplicaID &replica)
+    {
+        return (availability_zone_id == replica.availability_zone_id && slot_id == replica.slot_id);
+    }
+    bool operator<(const ReplicaID &other) const
+    {
+        return (availability_zone_id < other.availability_zone_id) || (availability_zone_id == other.availability_zone_id && slot_id < other.slot_id);
+    }
 } ReplicaID;
+
+typedef struct LogEntry
+{
+    int term;
+    string msg;
+    LogEntry(int t = 0, const string &m = "") : term(t), msg(m) {}
+} LogEntry;
+
+typedef struct RaftQuery
+{
+    bool valid;
+    Message msg_type;
+    ReplicaID sender;
+    int currentTerm;
+    int lastTerm;
+    int prefixTerm;
+    int prefixLen;
+    int commitLength;
+    int logLength;
+    bool granted;
+    vector<LogEntry> suffix;
+    int ack;
+    bool success;
+} RaftQuery;
 
 typedef struct RequestQuery
 {
@@ -71,6 +139,7 @@ typedef struct RequestQuery
     int operation;
     string key;
     string value;
+    RaftQuery raft_request;
 } RequestQuery;
 
 typedef struct ReplyResponse
@@ -80,279 +149,364 @@ typedef struct ReplyResponse
     string value;
 } ReplyResponse;
 
-void printReplicaID(const ReplicaID &replica)
+// ============================================================
+// Escape/unescape functions for strings using only '#' and '@'
+// ============================================================
+string serializeString(const string &input)
 {
-    cout << "ReplicaID {\n"
-         << "  availability_zone_id: " << replica.availability_zone_id << ",\n"
-         << "  slot_id: " << replica.slot_id << "\n"
-         << "}" << endl;
-}
-
-void printRequestQuery(const RequestQuery &req)
-{
-    cout << "RequestQuery {\n";
-    cout << "  request_replica_id: ";
-    printReplicaID(req.request_replica_id);
-    cout << "  other_replica_id: [\n";
-    for (const auto &replica : req.other_replica_id)
+    string output;
+    for (char c : input)
     {
-        cout << "    ";
-        printReplicaID(replica);
-    }
-    cout << "  ],\n";
-    cout << "  operation: " << req.operation << ",\n";
-    cout << "  key: \"" << req.key << "\",\n";
-    cout << "  value: \"" << req.value << "\"\n";
-    cout << "}" << endl;
-}
-
-void printReplyResponse(const ReplyResponse &reply)
-{
-    cout << "ReplyResponse {\n";
-    cout << "  reponse_replica_id: ";
-    printReplicaID(reply.reponse_replica_id);
-    cout << "  status: " << reply.status << ",\n";
-    cout << "  value: \"" << reply.value << "\"\n";
-    cout << "}" << endl;
-}
-
-// ------------------ ReplicaID Serialization ------------------
-
-// Serialize a ReplicaID as "availability_zone_id,slot_id"
-string serializeReplicaID(const ReplicaID &id)
-{
-    ostringstream oss;
-    oss << id.availability_zone_id << "," << id.slot_id;
-    return oss.str();
-}
-
-// Deserialize a ReplicaID from a string in the format "availability_zone_id,slot_id"
-ReplicaID deserializeReplicaID(const string &s)
-{
-    ReplicaID id;
-    size_t pos = s.find(',');
-    if (pos == string::npos)
-    {
-        throw runtime_error("Invalid ReplicaID serialization: missing comma");
-    }
-    try
-    {
-        id.availability_zone_id = stoi(s.substr(0, pos));
-        id.slot_id = stoi(s.substr(pos + 1));
-    }
-    catch (...)
-    {
-        throw runtime_error("Invalid ReplicaID serialization: conversion error");
-    }
-    return id;
-}
-
-// ------------------ Vector<ReplicaID> Serialization ------------------
-
-// Serialize a vector<ReplicaID> as "<count>|<serialized_replica1>|<serialized_replica2>|..."
-string serializeReplicaIDVector(const vector<ReplicaID> &vec)
-{
-    ostringstream oss;
-    oss << vec.size();
-    for (const auto &id : vec)
-    {
-        oss << "|" << serializeReplicaID(id);
-    }
-    return oss.str();
-}
-
-// Deserialize a vector<ReplicaID> from the format produced above.
-vector<ReplicaID> deserializeReplicaIDVector(const string &s)
-{
-    vector<ReplicaID> vec;
-    size_t pos = 0;
-    size_t next = s.find('|', pos);
-    if (next == string::npos)
-    {
-        // No pipe found: it should be an empty vector.
-        int count = stoi(s);
-        if (count != 0)
+        if (c == '@')
         {
-            throw runtime_error("Invalid serialized vector: count non-zero but no items found");
+            output += "@@";
         }
-        return vec;
-    }
-    int count = stoi(s.substr(pos, next - pos));
-    pos = next + 1;
-    for (int i = 0; i < count; i++)
-    {
-        next = s.find('|', pos);
-        string token;
-        if (next == string::npos)
+        else if (c == '#')
         {
-            token = s.substr(pos);
+            output += "@#";
         }
         else
         {
-            token = s.substr(pos, next - pos);
+            output.push_back(c);
         }
-        vec.push_back(deserializeReplicaID(token));
-        if (next == string::npos)
-            break;
-        pos = next + 1;
     }
-    if (vec.size() != static_cast<size_t>(count))
-    {
-        throw runtime_error("Mismatch in replica vector count");
-    }
-    return vec;
+    return output;
 }
 
-// ------------------ String Serialization ------------------
-
-// Serialize a string with length prefix: "<length>:<string>"
-// This ensures that any delimiter in the string does not break deserialization.
-string serializeString(const string &str)
+string deserializeString(const string &input)
 {
-    ostringstream oss;
-    oss << str.size() << ":" << str;
-    return oss.str();
+    string output;
+    for (size_t i = 0; i < input.size(); i++)
+    {
+        if (input[i] == '@' && i + 1 < input.size())
+        {
+            char next = input[i + 1];
+            if (next == '@')
+            {
+                output.push_back('@');
+                i++;
+            }
+            else if (next == '#')
+            {
+                output.push_back('#');
+                i++;
+            }
+            else
+            {
+                output.push_back('@'); // unknown escape: output '@'
+            }
+        }
+        else
+        {
+            output.push_back(input[i]);
+        }
+    }
+    return output;
 }
 
-// Deserialize a length-prefixed string starting at position 'pos' in s.
-// Updates 'pos' to point after the deserialized string.
-string deserializeString(const string &s, size_t &pos)
+// ------------------------------------------------------------
+// Utility: simple split on a character delimiter (no escape handling)
+// ------------------------------------------------------------
+vector<string> splitString(const string &s, char delimiter)
 {
-    size_t colonPos = s.find(':', pos);
-    if (colonPos == string::npos)
+    vector<string> tokens;
+    string token;
+    for (char c : s)
     {
-        throw runtime_error("Invalid serialized string: missing colon");
+        if (c == delimiter)
+        {
+            tokens.push_back(token);
+            token.clear();
+        }
+        else
+        {
+            token.push_back(c);
+        }
     }
-    int len = stoi(s.substr(pos, colonPos - pos));
-    pos = colonPos + 1;
-    if (pos + len > s.size())
-    {
-        throw runtime_error("Invalid serialized string: length exceeds input size");
-    }
-    string result = s.substr(pos, len);
-    pos += len;
-    return result;
+    tokens.push_back(token);
+    return tokens;
 }
 
-// ------------------ RequestQuery Serialization ------------------
-
-// Serialize a RequestQuery using '#' as field delimiter.
-// Fields are:
-// 1. Serialized request_replica_id
-// 2. Serialized other_replica_id (vector)
-// 3. operation (as integer)
-// 4. Serialized key (using length-prefix)
-// 5. Serialized value (using length-prefix)
-string serializeRequestQuery(const RequestQuery &rq)
+// ============================================================
+// ReplicaID
+// ------------------------------------------------------------
+// Serialize using '@' to separate its two integer fields.
+string serializeReplicaID(const ReplicaID &replica)
 {
-    ostringstream oss;
-    oss << serializeReplicaID(rq.request_replica_id);
-    oss << "#" << serializeReplicaIDVector(rq.other_replica_id);
-    oss << "#" << rq.operation;
-    oss << "#" << serializeString(rq.key);
-    oss << "#" << serializeString(rq.value);
-    return oss.str();
+    return to_string(replica.availability_zone_id) + "@" + to_string(replica.slot_id);
 }
 
-// Deserialize a RequestQuery from the format above.
-RequestQuery deserializeRequestQuery(const string &s)
+ReplicaID deserializeReplicaID(const string &data)
 {
-    RequestQuery rq;
-    size_t pos = 0;
-    size_t next = s.find('#', pos);
-    if (next == string::npos)
-        throw runtime_error("Invalid RequestQuery serialization: missing fields (request_replica_id)");
-    string replicaIDStr = s.substr(pos, next - pos);
-    rq.request_replica_id = deserializeReplicaID(replicaIDStr);
-
-    pos = next + 1;
-    next = s.find('#', pos);
-    if (next == string::npos)
-        throw runtime_error("Invalid RequestQuery serialization: missing other_replica_id field");
-    string vecStr = s.substr(pos, next - pos);
-    rq.other_replica_id = deserializeReplicaIDVector(vecStr);
-
-    pos = next + 1;
-    next = s.find('#', pos);
-    if (next == string::npos)
-        throw runtime_error("Invalid RequestQuery serialization: missing operation field");
-    try
+    ReplicaID r;
+    vector<string> parts = splitString(data, '@');
+    if (parts.size() >= 2)
     {
-        rq.operation = stoi(s.substr(pos, next - pos));
+        r.availability_zone_id = stoi(parts[0]);
+        r.slot_id = stoi(parts[1]);
     }
-    catch (...)
+    return r;
+}
+
+void printReplicaID(const ReplicaID &replica)
+{
+    cout << "{ availability_zone_id: " << replica.availability_zone_id
+         << ", slot_id: " << replica.slot_id << " }";
+}
+
+// ============================================================
+// LogEntry
+// ------------------------------------------------------------
+// Fields: term (int) and msg (string). We use '#' as the field delimiter,
+// but we escape the string field.
+string serializeLogEntry(const LogEntry &entry)
+{
+    return to_string(entry.term) + "#" + escapeString(entry.msg);
+}
+
+LogEntry deserializeLogEntry(const string &data)
+{
+    vector<string> parts = splitString(data, '#');
+    int term = 0;
+    string msg;
+    if (parts.size() >= 2)
     {
-        throw runtime_error("Invalid RequestQuery serialization: operation conversion failed");
+        term = stoi(parts[0]);
+        msg = unescapeString(parts[1]);
     }
+    return LogEntry(term, msg);
+}
 
-    pos = next + 1;
-    next = s.find('#', pos);
-    if (next == string::npos)
-        throw runtime_error("Invalid RequestQuery serialization: missing key field");
-    // The key field is a serialized string (length-prefixed)
-    string keySerialized = s.substr(pos, next - pos);
-    size_t dummy = 0;
-    rq.key = deserializeString(keySerialized, dummy);
+void printLogEntry(const LogEntry &entry)
+{
+    cout << "{ term: " << entry.term << ", msg: " << entry.msg << " }";
+}
 
-    pos = next + 1;
-    // The remaining part is the serialized value.
-    string valueSerialized = s.substr(pos);
-    dummy = 0;
-    rq.value = deserializeString(valueSerialized, dummy);
+// ============================================================
+// RaftQuery
+// ------------------------------------------------------------
+// We serialize the RaftQuery as a sequence of fields separated by '#'.
+// The fields are:
+//   0: valid (1 or 0)
+//   1: msg_type (as int)
+//   2: sender (serialized ReplicaID using '@')
+//   3: currentTerm
+//   4: lastTerm
+//   5: prefixTerm
+//   6: prefixLen
+//   7: commitLength
+//   8: logLength
+//   9: granted (1 or 0)
+//   10: suffix_count (number of log entries in suffix)
+// Then for each LogEntry in suffix, add two fields:
+//   (term, and msg (escaped))
+// Then add:
+//   next: ack
+//   last: success (1 or 0)
+string serializeRaftQuery(const RaftQuery &rq)
+{
+    stringstream ss;
+    ss << (rq.valid ? "1" : "0") << "#"
+       << to_string(rq.msg_type) << "#"
+       << serializeReplicaID(rq.sender) << "#"
+       << rq.currentTerm << "#"
+       << rq.lastTerm << "#"
+       << rq.prefixTerm << "#"
+       << rq.prefixLen << "#"
+       << rq.commitLength << "#"
+       << rq.logLength << "#"
+       << (rq.granted ? "1" : "0") << "#";
+    ss << rq.suffix.size();
+    for (size_t i = 0; i < rq.suffix.size(); i++)
+    {
+        ss << "#" << rq.suffix[i].term << "#" << escapeString(rq.suffix[i].msg);
+    }
+    ss << "#" << rq.ack << "#"
+       << (rq.success ? "1" : "0");
+    return ss.str();
+}
 
+RaftQuery deserializeRaftQuery(const string &data)
+{
+    RaftQuery rq;
+    vector<string> fields = splitString(data, '#');
+    // There must be at least 11 fields before the suffix list.
+    if (fields.size() < 11)
+    {
+        return rq; // error: return default-constructed query
+    }
+    rq.valid = (fields[0] == "1");
+    rq.msg_type = static_cast<Message>(stoi(fields[1]));
+    rq.sender = deserializeReplicaID(fields[2]);
+    rq.currentTerm = stoi(fields[3]);
+    rq.lastTerm = stoi(fields[4]);
+    rq.prefixTerm = stoi(fields[5]);
+    rq.prefixLen = stoi(fields[6]);
+    rq.commitLength = stoi(fields[7]);
+    rq.logLength = stoi(fields[8]);
+    rq.granted = (fields[9] == "1");
+    size_t suffixCount = stoul(fields[10]);
+    size_t expectedFields = 11 + suffixCount * 2 + 2;
+    if (fields.size() < expectedFields)
+    {
+        return rq; // error: not enough fields
+    }
+    rq.suffix.clear();
+    size_t index = 11;
+    for (size_t i = 0; i < suffixCount; i++)
+    {
+        int term = stoi(fields[index++]);
+        string msg = unescapeString(fields[index++]);
+        rq.suffix.push_back(LogEntry(term, msg));
+    }
+    rq.ack = stoi(fields[index++]);
+    rq.success = (fields[index++] == "1");
     return rq;
 }
 
-// ------------------ ReplyResponse Serialization ------------------
-
-// Serialize a ReplyResponse using '#' as the field delimiter.
-// Fields are:
-// 1. Serialized reponse_replica_id (using serializeReplicaID)
-// 2. status (as integer)
-// 3. Serialized value (using serializeString)
-string serializeReplyResponse(const ReplyResponse &rr)
+void printRaftQuery(const RaftQuery &rq)
 {
-    ostringstream oss;
-    oss << serializeReplicaID(rr.reponse_replica_id);
-    oss << "#" << rr.status;
-    oss << "#" << serializeString(rr.value);
-    return oss.str();
+    cout << "RaftQuery { valid: " << rq.valid
+         << ", msg_type: " << rq.msg_type
+         << ", sender: ";
+    printReplicaID(rq.sender);
+    cout << ", currentTerm: " << rq.currentTerm
+         << ", lastTerm: " << rq.lastTerm
+         << ", prefixTerm: " << rq.prefixTerm
+         << ", prefixLen: " << rq.prefixLen
+         << ", commitLength: " << rq.commitLength
+         << ", logLength: " << rq.logLength
+         << ", granted: " << rq.granted
+         << ", suffix: [";
+    for (size_t i = 0; i < rq.suffix.size(); i++)
+    {
+        printLogEntry(rq.suffix[i]);
+        if (i != rq.suffix.size() - 1)
+            cout << ", ";
+    }
+    cout << "], ack: " << rq.ack
+         << ", success: " << rq.success
+         << " }";
 }
 
-// Deserialize a ReplyResponse from the format above.
-ReplyResponse deserializeReplyResponse(const string &s)
+// ============================================================
+// RequestQuery
+// ------------------------------------------------------------
+// Fields:
+//   0: request_replica_id (serialized ReplicaID)
+//   1: count of other_replica_id (number of entries in vector)
+// Then for each other_replica_id, one field (serialized using ReplicaID)
+// Next field: operation (int)
+// Next: key (escaped string)
+// Next: value (escaped string)
+// Finally: raft_request (its entire serialized string, escaped so that inner '#' are preserved)
+string serializeRequestQuery(const RequestQuery &rq)
+{
+    stringstream ss;
+    ss << serializeReplicaID(rq.request_replica_id) << "#";
+    ss << rq.other_replica_id.size();
+    for (size_t i = 0; i < rq.other_replica_id.size(); i++)
+    {
+        ss << "#" << serializeReplicaID(rq.other_replica_id[i]);
+    }
+    ss << "#" << rq.operation << "#"
+       << escapeString(rq.key) << "#"
+       << escapeString(rq.value) << "#"
+       << escapeString(serializeRaftQuery(rq.raft_request));
+    return ss.str();
+}
+
+RequestQuery deserializeRequestQuery(const string &data)
+{
+    RequestQuery rq;
+    vector<string> fields = splitString(data, '#');
+    // Minimum fields: request_replica_id, count, operation, key, value, raft_request => 6 fields
+    if (fields.size() < 6)
+    {
+        return rq;
+    }
+    rq.request_replica_id = deserializeReplicaID(fields[0]);
+    size_t count = stoul(fields[1]);
+    size_t index = 2;
+    rq.other_replica_id.clear();
+    for (size_t i = 0; i < count; i++)
+    {
+        if (index < fields.size())
+        {
+            rq.other_replica_id.push_back(deserializeReplicaID(fields[index++]));
+        }
+    }
+    if (index >= fields.size())
+        return rq;
+    rq.operation = stoi(fields[index++]);
+    if (index >= fields.size())
+        return rq;
+    rq.key = unescapeString(fields[index++]);
+    if (index >= fields.size())
+        return rq;
+    rq.value = unescapeString(fields[index++]);
+    if (index >= fields.size())
+        return rq;
+    string raftEscaped = fields[index++];
+    string raftSerialized = unescapeString(raftEscaped);
+    rq.raft_request = deserializeRaftQuery(raftSerialized);
+    return rq;
+}
+
+void printRequestQuery(const RequestQuery &rq)
+{
+    cout << "RequestQuery { request_replica_id: ";
+    printReplicaID(rq.request_replica_id);
+    cout << ", other_replica_id: [";
+    for (size_t i = 0; i < rq.other_replica_id.size(); i++)
+    {
+        printReplicaID(rq.other_replica_id[i]);
+        if (i != rq.other_replica_id.size() - 1)
+            cout << ", ";
+    }
+    cout << "], operation: " << rq.operation
+         << ", key: " << rq.key
+         << ", value: " << rq.value
+         << ", raft_request: ";
+    printRaftQuery(rq.raft_request);
+    cout << " }";
+}
+
+// ============================================================
+// ReplyResponse
+// ------------------------------------------------------------
+// Fields:
+//   0: reponse_replica_id (serialized ReplicaID)
+//   1: status (int)
+//   2: value (escaped string)
+string serializeReplyResponse(const ReplyResponse &rr)
+{
+    stringstream ss;
+    ss << serializeReplicaID(rr.reponse_replica_id) << "#"
+       << rr.status << "#"
+       << escapeString(rr.value);
+    return ss.str();
+}
+
+ReplyResponse deserializeReplyResponse(const string &data)
 {
     ReplyResponse rr;
-    size_t pos = 0;
-    size_t next = s.find('#', pos);
-    if (next == string::npos)
-        throw runtime_error("Invalid ReplyResponse serialization: missing reponse_replica_id field");
-
-    // Field 1: reponse_replica_id
-    string replicaStr = s.substr(pos, next - pos);
-    rr.reponse_replica_id = deserializeReplicaID(replicaStr);
-
-    // Field 2: status
-    pos = next + 1;
-    next = s.find('#', pos);
-    if (next == string::npos)
-        throw runtime_error("Invalid ReplyResponse serialization: missing status field");
-    try
-    {
-        rr.status = stoi(s.substr(pos, next - pos));
-    }
-    catch (...)
-    {
-        throw runtime_error("Invalid ReplyResponse serialization: status conversion error");
-    }
-
-    // Field 3: value (length-prefixed)
-    pos = next + 1;
-    string valueSerialized = s.substr(pos);
-    size_t dummy = 0;
-    rr.value = deserializeString(valueSerialized, dummy);
-
+    vector<string> fields = splitString(data, '#');
+    if (fields.size() < 3)
+        return rr;
+    rr.reponse_replica_id = deserializeReplicaID(fields[0]);
+    rr.status = stoi(fields[1]);
+    rr.value = unescapeString(fields[2]);
     return rr;
+}
+
+void printReplyResponse(const ReplyResponse &rr)
+{
+    cout << "ReplyResponse { reponse_replica_id: ";
+    printReplicaID(rr.reponse_replica_id);
+    cout << ", status: " << rr.status
+         << ", value: " << rr.value
+         << " }";
 }
 
 // -------------------------------------------------------------------------------

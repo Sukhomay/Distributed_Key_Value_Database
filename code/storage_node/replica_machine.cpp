@@ -12,7 +12,7 @@
 using namespace std;
 
 #include "lsm.cpp" // External functions: start_compaction(), SET(), GET(), DEL()
-
+#include "raft_module.cpp" // External functions : print(), onReceiveRaftQuery(), broadcastMessage
 class ReplicaMachine
 {
 public:
@@ -111,7 +111,6 @@ private:
                     perror("At ReplicaMachine, sem_postt");
                     return EXIT_FAILURE;
                 }
-
             }
             else if (request_ptr->op == Operation::DEL)
             {
