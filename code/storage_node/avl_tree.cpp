@@ -276,35 +276,3 @@ vector<pair<string, string>> AVLTree::getSortedPairs() const
     return result;
 }
 
-// int main()
-// {
-//     AVLTree tree;
-
-//     // Insertion of unique (key, value) pairs
-//     tree.insert("apple", "A fruit");
-//     tree.insert("banana", "A yellow fruit");
-//     tree.insert("cherry", "A red fruit");
-
-//     // Display elements by key access
-//     cout << "Finding 'apple': " << tree.find("apple") << endl;
-//     tree.insert("apple", "A fruitafsgh");
-//     cout << "Finding 'apple': " << tree.find("apple") << endl;
-
-//     // Erase a key
-//     tree.erase("banana");
-
-//     // Check remaining size and values
-//     cout << "Size of tree: " << tree.size() << endl;
-
-//     // Try finding a deleted key
-//     cout << "Finding 'banana': " << tree.find("banana") << endl;
-
-//     // Access element by index
-//     cout << "Element at index 0: " << tree[1] << endl;
-//     vector<pair<string, string>> v = tree.getSortedPairs();
-//     for (auto &&i : v)
-//     {
-//         cout << i.first << " " << i.second << endl;
-//     }
-//     return 0;
-// }

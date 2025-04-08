@@ -212,8 +212,6 @@ private:
                         continue;
                     }
 
-                    cout << ok_buffer << endl;
-
                     // Close the initial client_fd; further communication will occur on the dedicated socket.
                     close(client_fd);
 
@@ -289,7 +287,6 @@ private:
             }
             else if (nfds == 0)
             {
-                cout << "We are sending heartbeats" << endl;
                 // Heartbeat sent for the first time and then no response received against it so we close the connection
                 if (heartbeat_sent)
                 {
@@ -308,7 +305,6 @@ private:
             {
                 if (events[i].data.fd == client_fd)
                 {
-                    cout << "Listening to client_fd" << endl;
                     string request;
                     if (recv_all(client_fd, request) == false)
                     {
@@ -357,6 +353,8 @@ private:
             {
                 return ReturnStatus::FAILURE;
             }
+
+            replica_map[request.request_replica_id.slot_id].request_ptr->reset();
 
             ReplyResponse reply;
             if (request.operation == Operation::SET)
@@ -446,6 +444,28 @@ private:
                 reply.status = static_cast<int>(replica_map[request.request_replica_id.slot_id].reply_ptr->status);
                 reply.value.assign(replica_map[request.request_replica_id.slot_id].reply_ptr->val, replica_map[request.request_replica_id.slot_id].reply_ptr->val_len);
 
+                if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
+                {
+                    perror("At JobManager, sem_post");
+                    return ReturnStatus::FAILURE;
+                }
+            }
+            else if (request.operation == Operation::RAFT)
+            {
+                if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
+                {
+                    perror("At JobManager, sem_wait");
+                    return ReturnStatus::FAILURE;
+                }
+
+                replica_map[request.request_replica_id.slot_id].request_ptr->op = Operation::RAFT;
+                replica_map[request.request_replica_id.slot_id].request_ptr->raft_query = request.raft_request;
+                if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
+                {
+                    perror("At JobManager, sem_post");
+                    return ReturnStatus::FAILURE;
+                }
+                
                 if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
                 {
                     perror("At JobManager, sem_post");

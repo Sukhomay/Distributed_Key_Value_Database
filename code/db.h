@@ -12,6 +12,8 @@
 #include <sstream>
 #include <string>
 #include <stdexcept>
+#include <ctime>
+#include <iomanip>
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstdlib>
@@ -49,12 +51,12 @@ using namespace std;
 
 #define MAX_STR_SIZE 1024 // Assume this as the maximum size of key or value
 #define JOB_REP_SHM_NAME "/jobmanager_replica_comm"
-#define MAXLINE 1024
 #define MAX_EVENTS 10
 const string FIELD_DELIM = "#";
 const string LIST_DELIM = "##";
 #define nullValue -1
 #define nullReplica ReplicaID{-1, -1}
+
 enum ReturnStatus
 {
     FAILURE = 0,
@@ -67,14 +69,33 @@ enum Role
     CANDIDATE,
     LEADER
 };
+
 enum Operation
 {
+    CREATE_PROPAGATE, // The first create send to a job manager who is responsible for sending to other job managers to create the respective replicas
+    CREATE,
     GET,
     SET,
-    DEL,
-    CREATE,
-    RAFT
+    DEL
 };
+string operationToString(Operation op)
+{
+    switch (op)
+    {
+    case GET:
+        return "GET";
+    case SET:
+        return "SET";
+    case DEL:
+        return "DEL";
+    case CREATE:
+        return "CREATE";
+    // case RAFT:
+    //     return "RAFT";
+    default:
+        return "UNKNOWN";
+    }
+}
 enum Message
 {
     VoteRequest,
@@ -98,13 +119,17 @@ typedef struct ReplicaID
         os << "ReplicaID : " << replica.availability_zone_id << " " << replica.slot_id << endl;
         return os;
     }
-    bool operator==(const ReplicaID &replica)
+    bool operator==(const ReplicaID &replica) const
     {
         return (availability_zone_id == replica.availability_zone_id && slot_id == replica.slot_id);
     }
     bool operator<(const ReplicaID &other) const
     {
         return (availability_zone_id < other.availability_zone_id) || (availability_zone_id == other.availability_zone_id && slot_id < other.slot_id);
+    }
+    bool operator!=(const ReplicaID &other) const
+    {
+        return (availability_zone_id != other.availability_zone_id || slot_id != other.slot_id);
     }
 } ReplicaID;
 
@@ -130,27 +155,37 @@ typedef struct RaftQuery
     vector<LogEntry> suffix;
     int ack;
     bool success;
+
+    void reset()
+    {
+        valid = false;
+        suffix.clear();
+    }
 } RaftQuery;
 
 typedef struct RequestQuery
 {
     ReplicaID request_replica_id;
     vector<ReplicaID> other_replica_id;
-    int operation;
-    string key;
-    string value;
-    RaftQuery raft_request;
+    long long request_id;
+    Operation operation;
+    int key_len;
+    char key[MAX_STR_SIZE];
+    int value_len;
+    char value[MAX_STR_SIZE];
 } RequestQuery;
 
 typedef struct ReplyResponse
 {
     ReplicaID reponse_replica_id;
-    int status;
-    string value;
+    long long request_id;
+    ReturnStatus status;
+    int value_len;
+    char value[MAX_STR_SIZE];
 } ReplyResponse;
 
 // ============================================================
-// Escape/unescape functions for strings using only '#' and '@'
+// Escape/deserialize functions for strings using only '#' and '@'
 // ============================================================
 string serializeString(const string &input)
 {
@@ -193,7 +228,7 @@ string deserializeString(const string &input)
             }
             else
             {
-                output.push_back('@'); // unknown escape: output '@'
+                output.push_back('@'); // unknown serialize: output '@'
             }
         }
         else
@@ -205,7 +240,7 @@ string deserializeString(const string &input)
 }
 
 // ------------------------------------------------------------
-// Utility: simple split on a character delimiter (no escape handling)
+// Utility: simple split on a character delimiter (no serialize handling)
 // ------------------------------------------------------------
 vector<string> splitString(const string &s, char delimiter)
 {
@@ -255,13 +290,57 @@ void printReplicaID(const ReplicaID &replica)
 }
 
 // ============================================================
+// ReplicaID Vector
+// ------------------------------------------------------------
+// Serialize a vector of ReplicaID objects into the format:
+// <vector_size>#<serialized_replicaID>#<serialized_replicaID>...
+string serializeReplicaIDVector(const vector<ReplicaID> &replicas)
+{
+    stringstream ss;
+    ss << replicas.size();
+    for (size_t i = 0; i < replicas.size(); i++)
+    {
+        ss << "#" << serializeReplicaID(replicas[i]);
+    }
+    return ss.str();
+}
+
+// Deserialize a string into a vector<ReplicaID> assuming the format above.
+// This function uses '#' as a delimiter.
+vector<ReplicaID> deserializeReplicaIDVector(const string &data)
+{
+    vector<ReplicaID> replicas;
+    istringstream iss(data);
+    string token;
+
+    // Retrieve the first token, which should be the vector size
+    if (getline(iss, token, '#'))
+    {
+        int count = stoi(token);
+        for (int i = 0; i < count; i++)
+        {
+            if (getline(iss, token, '#'))
+            {
+                ReplicaID replica = deserializeReplicaID(token);
+                replicas.push_back(replica);
+            }
+            else
+            {
+                // Tokenizing error: found fewer elements than expected.
+                break;
+            }
+        }
+    }
+    return replicas;
+}
+// ============================================================
 // LogEntry
 // ------------------------------------------------------------
 // Fields: term (int) and msg (string). We use '#' as the field delimiter,
-// but we escape the string field.
+// but we serialize the string field.
 string serializeLogEntry(const LogEntry &entry)
 {
-    return to_string(entry.term) + "#" + escapeString(entry.msg);
+    return to_string(entry.term) + "#" + serializeString(entry.msg);
 }
 
 LogEntry deserializeLogEntry(const string &data)
@@ -272,7 +351,7 @@ LogEntry deserializeLogEntry(const string &data)
     if (parts.size() >= 2)
     {
         term = stoi(parts[0]);
-        msg = unescapeString(parts[1]);
+        msg = deserializeString(parts[1]);
     }
     return LogEntry(term, msg);
 }
@@ -299,7 +378,7 @@ void printLogEntry(const LogEntry &entry)
 //   9: granted (1 or 0)
 //   10: suffix_count (number of log entries in suffix)
 // Then for each LogEntry in suffix, add two fields:
-//   (term, and msg (escaped))
+//   (term, and msg (serialized))
 // Then add:
 //   next: ack
 //   last: success (1 or 0)
@@ -319,7 +398,7 @@ string serializeRaftQuery(const RaftQuery &rq)
     ss << rq.suffix.size();
     for (size_t i = 0; i < rq.suffix.size(); i++)
     {
-        ss << "#" << rq.suffix[i].term << "#" << escapeString(rq.suffix[i].msg);
+        ss << "#" << rq.suffix[i].term << "#" << serializeString(rq.suffix[i].msg);
     }
     ss << "#" << rq.ack << "#"
        << (rq.success ? "1" : "0");
@@ -356,7 +435,7 @@ RaftQuery deserializeRaftQuery(const string &data)
     for (size_t i = 0; i < suffixCount; i++)
     {
         int term = stoi(fields[index++]);
-        string msg = unescapeString(fields[index++]);
+        string msg = deserializeString(fields[index++]);
         rq.suffix.push_back(LogEntry(term, msg));
     }
     rq.ack = stoi(fields[index++]);
@@ -397,9 +476,9 @@ void printRaftQuery(const RaftQuery &rq)
 //   1: count of other_replica_id (number of entries in vector)
 // Then for each other_replica_id, one field (serialized using ReplicaID)
 // Next field: operation (int)
-// Next: key (escaped string)
-// Next: value (escaped string)
-// Finally: raft_request (its entire serialized string, escaped so that inner '#' are preserved)
+// Next: key (serialized string)
+// Next: value (serialized string)
+// Finally: raft_request (its entire serialized string, serialized so that inner '#' are preserved)
 string serializeRequestQuery(const RequestQuery &rq)
 {
     stringstream ss;
@@ -410,9 +489,9 @@ string serializeRequestQuery(const RequestQuery &rq)
         ss << "#" << serializeReplicaID(rq.other_replica_id[i]);
     }
     ss << "#" << rq.operation << "#"
-       << escapeString(rq.key) << "#"
-       << escapeString(rq.value) << "#"
-       << escapeString(serializeRaftQuery(rq.raft_request));
+       << serializeString(rq.key) << "#"
+       << serializeString(rq.value) << "#"
+       << serializeString(serializeRaftQuery(rq.raft_request));
     return ss.str();
 }
 
@@ -441,14 +520,14 @@ RequestQuery deserializeRequestQuery(const string &data)
     rq.operation = stoi(fields[index++]);
     if (index >= fields.size())
         return rq;
-    rq.key = unescapeString(fields[index++]);
+    rq.key = deserializeString(fields[index++]);
     if (index >= fields.size())
         return rq;
-    rq.value = unescapeString(fields[index++]);
+    rq.value = deserializeString(fields[index++]);
     if (index >= fields.size())
         return rq;
     string raftEscaped = fields[index++];
-    string raftSerialized = unescapeString(raftEscaped);
+    string raftSerialized = deserializeString(raftEscaped);
     rq.raft_request = deserializeRaftQuery(raftSerialized);
     return rq;
 }
@@ -464,12 +543,13 @@ void printRequestQuery(const RequestQuery &rq)
         if (i != rq.other_replica_id.size() - 1)
             cout << ", ";
     }
-    cout << "], operation: " << rq.operation
+    cout << "], operation: " << operationToString(static_cast<Operation>(rq.operation))
          << ", key: " << rq.key
          << ", value: " << rq.value
          << ", raft_request: ";
     printRaftQuery(rq.raft_request);
-    cout << " }";
+    cout << " }\n\n";
+    fflush(stdout);
 }
 
 // ============================================================
@@ -478,13 +558,13 @@ void printRequestQuery(const RequestQuery &rq)
 // Fields:
 //   0: reponse_replica_id (serialized ReplicaID)
 //   1: status (int)
-//   2: value (escaped string)
+//   2: value (serialized string)
 string serializeReplyResponse(const ReplyResponse &rr)
 {
     stringstream ss;
     ss << serializeReplicaID(rr.reponse_replica_id) << "#"
        << rr.status << "#"
-       << escapeString(rr.value);
+       << serializeString(rr.value);
     return ss.str();
 }
 
@@ -496,7 +576,7 @@ ReplyResponse deserializeReplyResponse(const string &data)
         return rr;
     rr.reponse_replica_id = deserializeReplicaID(fields[0]);
     rr.status = stoi(fields[1]);
-    rr.value = unescapeString(fields[2]);
+    rr.value = deserializeString(fields[2]);
     return rr;
 }
 
@@ -506,7 +586,8 @@ void printReplyResponse(const ReplyResponse &rr)
     printReplicaID(rr.reponse_replica_id);
     cout << ", status: " << rr.status
          << ", value: " << rr.value
-         << " }";
+         << " }\n\n";
+    fflush(stdout);
 }
 
 // -------------------------------------------------------------------------------
@@ -518,15 +599,167 @@ typedef struct RequestToReplica
     char key[MAX_STR_SIZE];
     size_t val_len;
     char val[MAX_STR_SIZE];
+    RaftQuery raft_query;
+
+    // Member function to completely reset all members.
+    void reset()
+    {
+        key_len = 0;
+        val_len = 0;
+        raft_query.reset();
+    }
 } RequestToReplica;
 
 typedef struct ReplyFromReplica
 {
     sem_t sem;
     ReturnStatus status;
+    size_t key_len;
+    char key[MAX_STR_SIZE];
     size_t val_len;
     char val[MAX_STR_SIZE];
+
+    // Member function to completely reset all members.
+    void reset()
+    {
+        key_len = 0;
+        val_len = 0;
+    }
 } ReplyFromReplica;
+
+// ------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------------
+#include "json.hpp"
+using json = nlohmann::json;
+pair<string, int> getReplicaAddr(const ReplicaID &replica)
+{
+    int az_id = replica.availability_zone_id;
+    // Load JSON from file. Adjust the filename as needed.
+    ifstream inFile("CONFIG.json");
+    if (!inFile)
+    {
+        cerr << "Unable to open file\n";
+        return make_pair("", 0);
+    }
+
+    json j;
+    inFile >> j;
+    inFile.close();
+
+    pair<string, int> addr = make_pair("", 0);
+
+    // Iterate over the nodes array in the JSON object.
+    for (const auto &node : j["nodes"])
+    {
+        // Check if the node is an availability zone and has the requested id.
+        if (node.contains("type") && node["type"] == "availability_zone" &&
+            node.contains("id") && std::stoi(node["id"].get<std::string>()) == az_id)
+        {
+            // Extract host and port from the node.
+            string host = node.value("host", "");
+            int port = stoi(node.value("port", ""));
+            addr = make_pair(host, port);
+            break;
+        }
+    }
+
+    if (addr.first.empty())
+    {
+        cout << "Availability zone with id " << az_id << " not found." << endl;
+    }
+
+    return addr;
+}
+
+// ------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------------
+
+typedef struct LogMessage
+{
+    Operation op;
+    string key;
+    string value;
+    ReplicaID replicaID;
+    string localTime;
+} LogMessage;
+
+// Helper function to get the current local time as a string in "YYYY-MM-DD HH:MM:SS" format.
+string getCurrentLocalTime()
+{
+    auto now = chrono::system_clock::now();
+    time_t now_time = chrono::system_clock::to_time_t(now);
+    struct tm local_tm;
+#if defined(_WIN32) || defined(_WIN64)
+    localtime_s(&local_tm, &now_time);
+#else
+    localtime_r(&now_time, &local_tm);
+#endif
+    char buffer[80];
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &local_tm);
+    return string(buffer);
+}
+
+// Function to return a nicely formatted string from a LogMessage struct.
+string formatLogMessage(const LogMessage &msg)
+{
+    ostringstream oss;
+    oss << "[" << msg.localTime << "] "
+        << "Operation: " << operationToString(msg.op) << ", "
+        << "Key: " << msg.key << ", "
+        << "Value: " << msg.value << ", "
+        << "Replica: (" << msg.replicaID.availability_zone_id << ", " << msg.replicaID.slot_id << ")";
+    return oss.str();
+}
+
+// Serializes a LogMessage into a string.
+// Format: <op>#<key>#<value>#<serialized_replicaID>#<localTime>
+string serializeLogMessage(const LogMessage &msg)
+{
+    stringstream ss;
+    ss << static_cast<int>(msg.op) << "#"
+       << msg.key << "#"
+       << msg.value << "#"
+       << serializeReplicaID(msg.replicaID) << "#"
+       << msg.localTime;
+    return ss.str();
+}
+
+// Deserializes a string into a LogMessage object.
+// Expects the same format as produced by serializeLogMessage.
+LogMessage deserializeLogMessage(const string &s)
+{
+    LogMessage msg;
+    stringstream ss(s);
+    string token;
+
+    // Extract operation.
+    if (getline(ss, token, '#'))
+    {
+        msg.op = static_cast<Operation>(stoi(token));
+    }
+    // Extract key.
+    if (getline(ss, token, '#'))
+    {
+        msg.key = token;
+    }
+    // Extract value.
+    if (getline(ss, token, '#'))
+    {
+        msg.value = token;
+    }
+    // Extract ReplicaID.
+    if (getline(ss, token, '#'))
+    {
+        msg.replicaID = deserializeReplicaID(token);
+    }
+    // Extract localTime (rest of the line).
+    if (getline(ss, token))
+    {
+        msg.localTime = token;
+    }
+
+    return msg;
+}
 
 // ------------------------------------------------------------------------------------------------------
 

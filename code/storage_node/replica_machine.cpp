@@ -11,7 +11,6 @@
 
 using namespace std;
 
-#include "lsm.cpp" // External functions: start_compaction(), SET(), GET(), DEL()
 #include "raft_module.cpp" // External functions : print(), onReceiveRaftQuery(), broadcastMessage
 class ReplicaMachine
 {
@@ -56,12 +55,12 @@ public:
         reply_ptr = static_cast<ReplyFromReplica *>(rep_ptr);
 
         // Set up the LSM Ttree
-        mt = new MergeTree(to_string(replica_id.availability_zone_id) + "_" + to_string(replica_id.slot_id));
+        raft_machine = new Raft(replica_id, other_replica_id.size() + 1, other_replica_id, request_ptr, reply_ptr);
     }
 
     ~ReplicaMachine()
     {
-        delete mt;
+        delete raft_machine;
     }
 
     // Start the server loop
@@ -84,8 +83,7 @@ private:
     vector<ReplicaID> other_replica_id;
     RequestToReplica *request_ptr;
     ReplyFromReplica *reply_ptr;
-    MergeTree *mt;
-
+    Raft *raft_machine;
     // Main event loop (to be implemented)
     int run()
     {
@@ -97,54 +95,13 @@ private:
                 perror("At ReplicaMachine, sem_wait");
                 return EXIT_FAILURE;
             }
-            // Attend the request and respond accordingly;
-            if (request_ptr->op == Operation::SET)
+            if (request_ptr->op == Operation::RAFT)
             {
-                string key(request_ptr->key, request_ptr->key_len);
-                string val(request_ptr->val, request_ptr->val_len);
-
-                ReturnStatus status = mt->SET(key, val);
-                
-                reply_ptr->status = status;
-                if(sem_post(&(reply_ptr->sem)) == -1)
-                {
-                    perror("At ReplicaMachine, sem_postt");
-                    return EXIT_FAILURE;
-                }
-            }
-            else if (request_ptr->op == Operation::DEL)
-            {
-                string key(request_ptr->key, request_ptr->key_len);
-                
-                ReturnStatus status = mt->DEL(key);
-
-                reply_ptr->status = status;
-                if(sem_post(&(reply_ptr->sem)) == -1)
-                {
-                    perror("At ReplicaMachine, sem_postt");
-                    return EXIT_FAILURE;
-                }
-            }
-            else if (request_ptr->op == Operation::GET)
-            {
-                string key(request_ptr->key, request_ptr->key_len);
-                
-                pair<ReturnStatus, string> result = mt->GET(key);
-
-                reply_ptr->status = result.first;
-                reply_ptr->val_len = static_cast<size_t>((int)result.second.size() + 1);
-                memcpy(reply_ptr->val, result.second.c_str(), reply_ptr->val_len);
-                if(sem_post(&(reply_ptr->sem)) == -1)
-                {
-                    perror("At ReplicaMachine, sem_postt");
-                    return EXIT_FAILURE;
-                }
-
+                raft_machine->onReceiveRaftQuery(request_ptr->raft_query);
             }
             else
             {
-                cerr << "Invalid Operation at ReplicaMachine" << endl;
-                return EXIT_FAILURE;
+                raft_machine->onReceiveBroadcastMessage(*request_ptr);
             }
         }
         return EXIT_SUCCESS;

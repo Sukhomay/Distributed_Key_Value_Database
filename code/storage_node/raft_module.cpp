@@ -1,15 +1,10 @@
 #include "../db.h"
+#include "lsm.cpp" // External functions: start_compaction(), SET(), GET(), DEL()
 
-pair<string, int> getIP(const ReplicaID &replica)
-{
-    // For hardcoded loopback address with port based on slot_id.
-    // For example, port = 5000 + replica.slot_id.
-    return make_pair(string("127.0.0.1"), 5000 + replica.slot_id);
-}
 class Raft
 {
 public:
-    Raft(ReplicaID self, int numPeers, vector<ReplicaID> &peers)
+    Raft(ReplicaID self, int numPeers, vector<ReplicaID> &peers, RequestToReplica *request_ptr_, ReplyFromReplica *reply_ptr_)
         : nodeId(self),
           numPeers(numPeers),
           currentTerm(0),
@@ -20,10 +15,13 @@ public:
           votesReceived(),
           sentLength(numPeers, 0),
           ackedLength(numPeers, 0),
-          nodes(peers)
+          nodes(peers),
+          request_ptr(request_ptr_),
+          reply_ptr(reply_ptr_)
     {
         initState();
-
+        // Set up the LSM Ttree
+        mt = new MergeTree(to_string(nodeId.availability_zone_id) + "_" + to_string(nodeId.slot_id));
         // For each peer, establish a TCP connection.
         for (size_t i = 0; i < peers.size(); i++)
         {
@@ -31,8 +29,8 @@ public:
             if (peers[i] == nodeId)
                 continue;
 
-            // Assume getIP returns a pair<string, int> representing IP address and port.
-            auto [ip, port] = getIP(peers[i]);
+            // Assume getReplicaAddr returns a pair<string, int> representing IP address and port.
+            auto [ip, port] = getReplicaAddr(peers[i]);
 
             // Create a socket.
             int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -66,7 +64,12 @@ public:
             sockfds[peers[i]] = sockfd;
         }
     }
-
+    
+    ~Raft()
+    {
+        // Will implement later
+        delete mt;
+    }
     void print() const
     {
         cout << "nodeId         : (" << nodeId.slot_id << ", " << nodeId.availability_zone_id << ")" << endl;
@@ -144,14 +147,36 @@ public:
         }
     }
 
-    void broadcastMessage(RequestQuery &request)
+    void onReceiveBroadcastMessage(RequestToReplica &request)
     {
+        cout << "Let's Broadcast message : " << operationToString(request.op) << endl;
+        // if (request.op == Operation::CREATE)
+        // {
+        //     for (auto &&node : nodes)
+        //     {
+        //         RequestQuery query;
+        //         query.request_replica_id = currentLeader;
+        //         query.operation = request.op;
+        //         query.key = string(request.key, request.key_len);
+        //         query.value = string(request.val, request.val_len);
+        //         query.raft_request.reset();
+        //         query.other_replica_id.clear();
+                
+                
+        //     }
+        //     return;
+        // }
         std::lock_guard<std::mutex> lock(mtx);
-
+        LogMessage logmsg;
+        logmsg.op = request.op;
+        logmsg.key = string(request.key, request.key_len);
+        logmsg.value = string(request.val, request.val_len);
+        logmsg.replicaID = nodeId;
+        logmsg.localTime = getCurrentLocalTime();
         if (currentRole == LEADER)
         {
             // Append the record to log
-            log.emplace_back(currentTerm, serializeRequestQuery(request));
+            log.emplace_back(LogEntry(currentTerm, formatLogMessage(logmsg)));
 
             // Acknowledge for self
             ackedLength[nodeId.slot_id] = log.size();
@@ -168,12 +193,27 @@ public:
         else
         {
             // Forward to leader via FIFO (placeholder for actual networking)
-            std::cout << "[Forwarding to Leader] "
-                      << "LeaderID: " << currentLeader;
-            printRequestQuery(request);
+            // std::cout << "[Forwarding to Leader] "
+            //           << "LeaderID: " << currentLeader;
 
             // TODO: Implement actual message forwarding over network
-            send_all(sockfds[currentLeader], serializeRequestQuery(request));
+            RequestQuery query;
+            query.request_replica_id = currentLeader;
+            query.operation = request.op;
+            query.key = string(request.key, request.key_len);
+            query.value = string(request.val, request.val_len);
+            query.raft_request.reset();
+            query.other_replica_id.clear();
+            for (auto &&i : nodes)
+            {
+                if (i != currentLeader)
+                {
+                    query.other_replica_id.push_back(i);
+                }
+            }
+            query.other_replica_id.push_back(nodeId);
+            cout << "Sending request to Leader : " << printReplicaID(currentLeader) << endl;
+            send_all(sockfds[currentLeader], serializeRequestQuery(query));
         }
     }
 
@@ -190,10 +230,13 @@ private:
     vector<int> sentLength;
     vector<int> ackedLength;
     vector<ReplicaID> nodes;
+    MergeTree *mt;
     thread periodicThread;
     mutex mtx;
     chrono::steady_clock::time_point electionDeadline;
     map<ReplicaID, int> sockfds;
+    RequestToReplica *request_ptr;
+    ReplyFromReplica *reply_ptr;
 
     bool sendRaftQuery(RaftQuery &request, const ReplicaID &destination)
     {
@@ -278,12 +321,28 @@ private:
                     if (!log.empty())
                         lastTerm = log.back().term;
 
-                    cout << "Election timeout: starting election for term " << currentTerm << endl;
-                    cout << "Sending VoteRequest: (VoteRequest, " << nodeId.slot_id << ", "
-                         << currentTerm << ", " << log.size() << ", " << lastTerm << ")" << endl;
-                    for (const ReplicaID &ReplicaID : nodes)
+                    // cout << "Election timeout: starting election for term " << currentTerm << endl;
+                    // cout << "Sending VoteRequest: (VoteRequest, " << nodeId.slot_id << ", "
+                    //      << currentTerm << ", " << log.size() << ", " << lastTerm << ")" << endl;
+                    for (const ReplicaID &other_node : nodes)
                     {
-                        cout << "   Sending VoteRequest to node " << ReplicaID.slot_id << endl;
+                        // cout << "   Sending VoteRequest to node " << ReplicaID.slot_id << endl;
+                        RaftQuery request;
+                        request.valid = true;
+                        request.msg_type = VoteRequest; // Assuming VoteResponse is a valid Message enum value
+                        request.sender = nodeId;        // This node is the sender of the response
+                        request.currentTerm = currentTerm;
+                        request.lastTerm = lastTerm;
+                        request.prefixTerm = 0;              // Not applicable for vote responses
+                        request.prefixLen = 0;               // Not applicable for vote responses
+                        request.commitLength = commitLength; // Assuming commitLength is a defined member variable
+                        request.logLength = log.size();
+                        request.granted = 0;
+                        request.suffix.clear(); // No log entries needed in the vote response
+                        request.ack = 0;        // Not used in vote responses
+                        request.success = 0;    // Reflecting the vote decision
+
+                        sendRaftQuery(request, other_node);
                     }
                     resetElectionTimer();
                 }
@@ -379,11 +438,11 @@ private:
         {
             votedFor = cId;
             voteGranted = true;
-            cout << "Sending VoteResponse: (VoteResponse, " << nodeId.slot_id << ", " << currentTerm << ", true) to node " << cId << endl;
+            // cout << "Sending VoteResponse: (VoteResponse, " << nodeId.slot_id << ", " << currentTerm << ", true) to node " << cId << endl;
         }
         else
         {
-            cout << "Sending VoteResponse: (VoteResponse, " << nodeId.slot_id << ", " << currentTerm << ", false) to node " << cId << endl;
+            // cout << "Sending VoteResponse: (VoteResponse, " << nodeId.slot_id << ", " << currentTerm << ", false) to node " << cId << endl;
         }
         RaftQuery request;
         request.valid = true;
@@ -446,20 +505,20 @@ private:
             prefixTerm = log[prefixLen - 1].term;
         }
 
-        // Simulate sending (LogRequest, leaderId, currentTerm, prefixLen,
-        // prefixTerm, commitLength, suffix) to followerId
-        cout << "Sending LogRequest to follower " << followerId.slot_id << ":\n";
-        cout << "  Leader ID     : " << nodeId << "\n";
-        cout << "  Term          : " << currentTerm << "\n";
-        cout << "  Prefix Length : " << prefixLen << "\n";
-        cout << "  Prefix Term   : " << prefixTerm << "\n";
-        cout << "  Commit Length : " << commitLength << "\n";
-        cout << "  Suffix        : [";
-        for (const auto &entry : suffix)
-        {
-            cout << " (Term: " << entry.term << ", Msg: " << entry.msg << ")";
-        }
-        cout << " ]\n";
+        // // Simulate sending (LogRequest, leaderId, currentTerm, prefixLen,
+        // // prefixTerm, commitLength, suffix) to followerId
+        // cout << "Sending LogRequest to follower " << followerId.slot_id << ":\n";
+        // cout << "  Leader ID     : " << nodeId << "\n";
+        // cout << "  Term          : " << currentTerm << "\n";
+        // cout << "  Prefix Length : " << prefixLen << "\n";
+        // cout << "  Prefix Term   : " << prefixTerm << "\n";
+        // cout << "  Commit Length : " << commitLength << "\n";
+        // cout << "  Suffix        : [";
+        // for (const auto &entry : suffix)
+        // {
+        //     cout << " (Term: " << entry.term << ", Msg: " << entry.msg << ")";
+        // }
+        // cout << " ]\n";
 
         RaftQuery request;
         request.valid = true;
@@ -514,11 +573,11 @@ private:
             appendEntries(prefixLen, leaderCommit, suffix);
             int ack = prefixLen + suffix.size();
 
-            cout << "Sending LogResponse to leader " << leaderId << ":\n";
-            cout << "  From Node     : " << nodeId.slot_id << "\n";
-            cout << "  Term          : " << currentTerm << "\n";
-            cout << "  Ack           : " << ack << "\n";
-            cout << "  Success       : true\n";
+            // cout << "Sending LogResponse to leader " << leaderId << ":\n";
+            // cout << "  From Node     : " << nodeId.slot_id << "\n";
+            // cout << "  Term          : " << currentTerm << "\n";
+            // cout << "  Ack           : " << ack << "\n";
+            // cout << "  Success       : true\n";
 
             request.ack = ack;
             request.success = true;
@@ -526,11 +585,11 @@ private:
         }
         else
         {
-            cout << "Sending LogResponse to leader " << leaderId << ":\n";
-            cout << "  From Node     : " << nodeId.slot_id << "\n";
-            cout << "  Term          : " << currentTerm << "\n";
-            cout << "  Ack           : 0\n";
-            cout << "  Success       : false\n";
+            // cout << "Sending LogResponse to leader " << leaderId << ":\n";
+            // cout << "  From Node     : " << nodeId.slot_id << "\n";
+            // cout << "  Term          : " << currentTerm << "\n";
+            // cout << "  Ack           : 0\n";
+            // cout << "  Success       : false\n";
 
             request.ack = 0;
             request.success = false;
@@ -567,7 +626,7 @@ private:
             for (int i = commitLength; i < min(leaderCommit, static_cast<int>(log.size())); ++i)
             {
                 // Simulate delivering to application
-                cout << "Delivering to application: " << log[i].msg << endl;
+                // cout << "Delivering to application: " << log[i].msg << endl;
             }
             commitLength = min(leaderCommit, static_cast<int>(log.size()));
         }
@@ -597,11 +656,57 @@ private:
             resetElectionTimer();
         }
     }
-
-    void COMMIT(const string &msg)
+    int replyToJobManager(LogMessage &query, ReturnStatus status)
     {
-        // Simulate delivering a message to the application
-        cout << "Committing to application: " << msg << endl;
+        if (query.replicaID == nodeId)
+        {
+            reply_ptr->reset(); // reset (if needed)
+            reply_ptr->status = status;
+
+            // Copy key from query to reply_ptr.
+            reply_ptr->key_len = query.key.size();
+            memcpy(reply_ptr->key, query.key.c_str(), reply_ptr->key_len);
+            // Ensure null-termination for safety.
+            reply_ptr->key[reply_ptr->key_len] = '\0';
+
+            // Copy value from query to reply_ptr.
+            reply_ptr->val_len = query.value.size();
+            memcpy(reply_ptr->val, query.value.c_str(), reply_ptr->val_len);
+            reply_ptr->val[reply_ptr->val_len] = '\0';
+
+            if (sem_post(&(reply_ptr->sem)) == -1)
+            {
+                perror("At RaftModule, sem_post");
+                return EXIT_FAILURE;
+            }
+        }
+        return EXIT_SUCCESS;
+    }
+    int COMMIT(const string &msg)
+    {
+        LogMessage query = deserializeLogMessage(msg);
+        if (query.op == Operation::DEL)
+        {
+            ReturnStatus status = mt->DEL(query.key);
+            replyToJobManager(query, status);
+        }
+        else if (query.op == Operation::SET)
+        {
+            ReturnStatus status = mt->SET(query.key, query.value);
+            replyToJobManager(query, status);
+        }
+        else if (query.op == Operation::GET)
+        {
+            pair<ReturnStatus, string> result = mt->GET(query.key);
+            query.value = result.second;
+            replyToJobManager(query, result.first);
+        }
+        else
+        {
+            cerr << "Invalid Operation at ReplicaMachine" << endl;
+            return EXIT_FAILURE;
+        }
+        return EXIT_SUCCESS;
     }
 
     void commitLogEntries()
@@ -638,18 +743,3 @@ private:
         }
     }
 };
-
-int main()
-{
-    // ReplicaID self = {0, 999}; // nodeId = (0, 999)
-    // vector<ReplicaID> peers = {{1, 100}, {2, 101}, {3, 102}};
-    // // Raft raft(self, 4, peers);
-
-    // raft.print();
-
-    // // Sample VoteRequest
-    // ReplicaID candidate = {1, 100};
-    // raft.onReceiveVoteRequest(candidate, 1, 0, 0); // cTerm=1, logLength=0, logTerm=0
-
-    return 0;
-}
