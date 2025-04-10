@@ -174,7 +174,7 @@ int main()
     req.key_len = req.value_len = 3;
     memcpy(req.key, "aaa", 3);
     memcpy(req.value, "AAA", 3);
-
+    req.print();
     send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);

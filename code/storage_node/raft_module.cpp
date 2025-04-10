@@ -186,6 +186,7 @@ private:
             string result;
             recv_all(client_fd, result);
             RaftQuery raftQuery = RaftQuery::deserialize(result);
+            raftQuery.print();
             onReceiveRaftQuery(raftQuery);
             close(client_fd);
         }
