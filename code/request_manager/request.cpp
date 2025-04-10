@@ -82,38 +82,6 @@
 
 #include <bits/stdc++.h>
 
-// Set a file descriptor to non-blocking mode.
-void set_non_blocking(int fd)
-{
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1)
-        throw runtime_error("fcntl(F_GETFL) failed");
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
-        throw runtime_error("fcntl(F_SETFL) failed");
-}
-
-int extractPort(const std::string &port_msg)
-{
-    const std::string prefix = "CONNECT TO PORT ";
-    size_t pos = port_msg.find(prefix);
-    if (pos == std::string::npos)
-    {
-        throw std::runtime_error("Invalid port message: prefix not found");
-    }
-    // Calculate the starting position of the port number.
-    size_t start = pos + prefix.length();
-    // Find the end of the port number (assume newline as delimiter).
-    size_t end = port_msg.find('\n', start);
-    if (end == std::string::npos)
-    {
-        end = port_msg.length(); // If no newline is found, take the rest of the string.
-    }
-    // Extract the port number as a substring.
-    std::string port_str = port_msg.substr(start, end - start);
-    // Convert the substring to an integer.
-    int port = std::stoi(port_str);
-    return port;
-}
 
 int main()
 {
@@ -188,78 +156,90 @@ int main()
     cout << resp << endl;
 
     RequestQuery req;
-    req.operation = Operation::CREATE;
+    req.operation = Operation::CREATE_PROPAGATE;
     req.request_replica_id = ReplicaID{0, 3};
     req.sibling_replica_id.push_back(ReplicaID{1, 4});
-    req.sibling_replica_id.push_back(ReplicaID{2, 5});
 
-    printRequestQuery(req);
-    send_all(sockfd, serializeRequestQuery(req));
+    req.print();
+    send_all(sockfd, req.serialize());
 
 
     recv_all(sockfd, resp);
 
-    printReplyResponse(deserializeReplyResponse(resp));
+    ReplyResponse reply_resp = ReplyResponse::deserialize(resp);
+    reply_resp.print();
 
     req.operation = Operation::SET;
     req.request_replica_id = ReplicaID{0, 2};
-    req.key = "aaa";
-    req.value = "AAA";
+    req.key_len = req.value_len = 3;
+    memcpy(req.key, "aaa", 3);
+    memcpy(req.value, "AAA", 3);
 
-    send_all(sockfd, serializeRequestQuery(req));
+    send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
 
-    printReplyResponse(deserializeReplyResponse(resp));
+    reply_resp = ReplyResponse::deserialize(resp);
+    reply_resp.print();
 
     req.operation = Operation::SET;
     req.request_replica_id = ReplicaID{0, 2};
-    req.key = "ccc";
-    req.value = "CCC";
+    req.key_len = req.value_len = 3;
+    memcpy(req.key, "ccc", 3);
+    memcpy(req.value, "CCC", 3);
 
-    send_all(sockfd, serializeRequestQuery(req));
+    send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
 
-    printReplyResponse(deserializeReplyResponse(resp));
+    reply_resp = ReplyResponse::deserialize(resp);
+    reply_resp.print();
 
     req.operation = Operation::GET;
     req.request_replica_id = ReplicaID{0, 2};
-    req.key = "aaa";
+    req.key_len = 3;
+    memcpy(req.key, "aaa", 3);
 
-    send_all(sockfd, serializeRequestQuery(req));
+    send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
 
-    printReplyResponse(deserializeReplyResponse(resp));
+    reply_resp = ReplyResponse::deserialize(resp);
+    reply_resp.print();
 
     req.operation = Operation::GET;
     req.request_replica_id = ReplicaID{0, 2};
-    req.key = "bbb";
+    req.key_len = 3;
+    memcpy(req.key, "bbb", 3);
 
-    send_all(sockfd, serializeRequestQuery(req));
+    send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
 
-    printReplyResponse(deserializeReplyResponse(resp));
+    reply_resp = ReplyResponse::deserialize(resp);
+    reply_resp.print();
 
     req.operation = Operation::DEL;
     req.request_replica_id = ReplicaID{0, 2};
-    req.key = "ccc";
+    req.key_len = 3;
+    memcpy(req.key, "ccc", 3);
 
-    send_all(sockfd, serializeRequestQuery(req));
+    send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
 
-    printReplyResponse(deserializeReplyResponse(resp));
+    reply_resp = ReplyResponse::deserialize(resp);
+    reply_resp.print();
 
     req.operation = Operation::GET;
     req.request_replica_id = ReplicaID{0, 2};
-    req.key = "ccc";
+    req.key_len = 3;
+    memcpy(req.key, "ccc", 3);
 
-    send_all(sockfd, serializeRequestQuery(req));
+    send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
 
-    printReplyResponse(deserializeReplyResponse(resp));
+    reply_resp = ReplyResponse::deserialize(resp);
+    reply_resp.print();
 }

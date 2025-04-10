@@ -4,7 +4,7 @@
 class Raft
 {
 public:
-    Raft(ReplicaID self, int numPeers, vector<ReplicaID> &peers, ReplyFromReplica *reply_ptr_)
+    Raft(ReplicaID self, int numPeers, vector<ReplicaID> &peers, ReplyFromReplica *reply_ptr_, int replica_sockfd_, map<ReplicaID, Address> &replicaInfo_)
         : nodeId(self),
           numPeers(numPeers),
           currentTerm(0),
@@ -16,51 +16,22 @@ public:
           sentLength(numPeers, 0),
           ackedLength(numPeers, 0),
           nodes(peers),
-          reply_ptr(reply_ptr_)
+          reply_ptr(reply_ptr_),
+          replicaInfo(replicaInfo_),
+          replicaSockfd(replica_sockfd_)
     {
-        initState();
-        // Set up the LSM Ttree
+        // initialise 2 threads.
+        // 1. Periodic HEARTBEAT_MSSG and timeout expiry
+        // 2. Listening for TCP connections over own socket
+        // 3. Waiting on shared memory for user requests --> Not here, main() of replica_machine is doing this
+        // initState();
+
         mt = new MergeTree(to_string(nodeId.availability_zone_id) + "_" + to_string(nodeId.slot_id));
-        // For each peer, establish a TCP connection.
-        for (size_t i = 0; i < peers.size(); i++)
-        {
-            // Skip connection to self.
-            if (peers[i] == nodeId)
-                continue;
-
-            // Assume getReplicaAddr returns a pair<string, int> representing IP address and port.
-            auto [ip, port] = getReplicaAddr(peers[i]);
-
-            // Create a socket.
-            int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-            if (sockfd < 0)
-            {
-                cerr << "Socket creation failed for peer " << peers[i].serialize() << endl;
-                continue;
-            }
-
-            // Set up the server address struct.
-            sockaddr_in serv_addr;
-            memset(&serv_addr, 0, sizeof(serv_addr));
-            serv_addr.sin_family = AF_INET;
-            serv_addr.sin_port = htons(port);
-            if (inet_pton(AF_INET, ip.c_str(), &serv_addr.sin_addr) <= 0)
-            {
-                cerr << "Invalid address for peer " << peers[i].serialize() << endl;
-                close(sockfd);
-                continue;
-            }
-            // Connect to the peer.
-            if (connect(sockfd, (sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
-            {
-                cerr << "Connection failed for peer " << peers[i].serialize() << endl;
-                close(sockfd);
-                continue;
-            }
-
-            // Store the socket file descriptor.
-            sockfds[peers[i]] = sockfd;
-        }
+        Address node_addr = replicaInfo[nodeId];
+        std::thread thread1(&Raft::runPeriodicTask, this);
+        std::thread thread2(&Raft::startTcpServer, this, node_addr);
+        thread1.join();
+        thread2.join();
     }
 
     ~Raft()
@@ -68,51 +39,166 @@ public:
         // Will implement later
         delete mt;
     }
-    void print() const
+    // void print() const
+    // {
+    //     cout << "nodeId         : (" << nodeId.slot_id << ", " << nodeId.availability_zone_id << ")" << endl;
+    //     cout << "======== Raft State ========" << endl;
+    //     cout << "numPeers       : " << numPeers << endl;
+    //     cout << "currentTerm    : " << currentTerm << endl;
+    //     cout << "votedFor       : " << votedFor.serialize() << endl;
+    //     cout << "commitLength   : " << commitLength << endl;
+    //     cout << "currentRole    : " << roleToString(currentRole) << endl;
+    //     cout << "currentLeader  : " << currentLeader.serialize() << endl;
+
+    //     cout << "votesReceived  : { ";
+    //     for (ReplicaID vote : votesReceived)
+    //         cout << vote.serialize() << " ";
+    //     cout << "}" << endl;
+
+    //     cout << "sentLength     : [ ";
+    //     for (int s : sentLength)
+    //         cout << s << " ";
+    //     cout << "]" << endl;
+
+    //     cout << "ackedLength    : [ ";
+    //     for (int a : ackedLength)
+    //         cout << a << " ";
+    //     cout << "]" << endl;
+
+    //     cout << "Log Entries:" << endl;
+    //     for (size_t i = 0; i < log.size(); i++)
+    //     {
+    //         cout << "  [" << i << "] Term: " << log[i].term
+    //              << ", Msg: " << log[i].msg << endl;
+    //     }
+
+    //     cout << "Nodes:" << endl;
+    //     for (size_t i = 0; i < nodes.size(); i++)
+    //     {
+    //         cout << "  Node " << i << " -> slot_id: " << nodes[i].slot_id << ", availability_zone_id: " << nodes[i].availability_zone_id << endl;
+    //     }
+    //     cout << "============================" << endl;
+    // }
+
+    void onReceiveUserRequest(RequestQuery &request)
     {
-        cout << "nodeId         : (" << nodeId.slot_id << ", " << nodeId.availability_zone_id << ")" << endl;
-        cout << "======== Raft State ========" << endl;
-        cout << "numPeers       : " << numPeers << endl;
-        cout << "currentTerm    : " << currentTerm << endl;
-        cout << "votedFor       : " << votedFor.serialize() << endl;
-        cout << "commitLength   : " << commitLength << endl;
-        cout << "currentRole    : " << roleToString(currentRole) << endl;
-        cout << "currentLeader  : " << currentLeader.serialize() << endl;
-
-        cout << "votesReceived  : { ";
-        for (ReplicaID vote : votesReceived)
-            cout << vote.serialize() << " ";
-        cout << "}" << endl;
-
-        cout << "sentLength     : [ ";
-        for (int s : sentLength)
-            cout << s << " ";
-        cout << "]" << endl;
-
-        cout << "ackedLength    : [ ";
-        for (int a : ackedLength)
-            cout << a << " ";
-        cout << "]" << endl;
-
-        cout << "Log Entries:" << endl;
-        for (size_t i = 0; i < log.size(); i++)
+        /////// Need to fix !!!!
+        std::lock_guard<std::mutex> lock(mtx);
+        LogMessage logmsg;
+        logmsg.op = request.operation;
+        logmsg.key = string(request.key, request.key_len);
+        logmsg.value = string(request.value, request.value_len);
+        logmsg.replicaID = nodeId;
+        logmsg.localTime = getCurrentLocalTime();
+        if (currentRole == LEADER)
         {
-            cout << "  [" << i << "] Term: " << log[i].term
-                 << ", Msg: " << log[i].msg << endl;
+            // Append the record to log
+            log.emplace_back(LogEntry(currentTerm, logmsg.format()));
+
+            // Acknowledge for self
+            ackedLength[nodeId.slot_id] = log.size();
+
+            // Replicate to all followers
+            for (const ReplicaID &follower : nodes)
+            {
+                if (follower.slot_id != nodeId.slot_id)
+                {
+                    replicateLog(follower);
+                }
+            }
+        }
+        else
+        {
+            RaftQuery raftQuery;
+            raftQuery.reset();
+            raftQuery.request_query = request;
+            raftQuery.msg_type = Message::UserRequest;
+            cout << "Sending request to Leader : ";
+            currentLeader.print();
+            cout << endl;
+            sendReplica(replicaInfo[currentLeader], raftQuery.serialize());
+        }
+    }
+
+private:
+    ReplicaID nodeId;
+    int numPeers;
+    int currentTerm;
+    ReplicaID votedFor;
+    vector<LogEntry> log;
+    int commitLength;
+    Role currentRole;
+    ReplicaID currentLeader;
+    set<ReplicaID> votesReceived;
+    vector<int> sentLength;
+    vector<int> ackedLength;
+    vector<ReplicaID> nodes;
+    MergeTree *mt;
+    thread periodicThread;
+    mutex mtx;
+    chrono::steady_clock::time_point electionDeadline;
+    RequestToReplica *request_ptr;
+    ReplyFromReplica *reply_ptr;
+    map<ReplicaID, Address> replicaInfo;
+    int replicaSockfd;
+
+    void startTcpServer(const Address &node_addr)
+    {
+
+        // Start listening (with a backlog of 10).
+        cout << "replicaSockfd : " << replicaSockfd << endl;
+        if (listen(replicaSockfd, 10) < 0)
+        {
+            perror("listen failed");
+            close(replicaSockfd);
+            return;
         }
 
-        cout << "Nodes:" << endl;
-        for (size_t i = 0; i < nodes.size(); i++)
+        std::cout << "TCP server listening on " << node_addr.host << ":" << node_addr.port << std::endl;
+
+        while (true)
         {
-            cout << "  Node " << i << " -> slot_id: " << nodes[i].slot_id << ", availability_zone_id: " << nodes[i].availability_zone_id << endl;
+            struct sockaddr_in clientAddr;
+            socklen_t clientLen = sizeof(clientAddr);
+            int client_fd = accept(replicaSockfd, (struct sockaddr *)&clientAddr, &clientLen);
+            if (client_fd < 0)
+            {
+                perror("accept failed");
+                continue;
+            }
+            // Buffer to store the client IP address in string format.
+            char clientIP[INET_ADDRSTRLEN];
+            // Convert the client's IP address to string form.
+            if (inet_ntop(AF_INET, &clientAddr.sin_addr, clientIP, sizeof(clientIP)) == NULL)
+            {
+                perror("inet_ntop failed");
+                // Optionally handle error
+            }
+
+            // Convert the port number from network byte order to host byte order.
+            int clientPort = ntohs(clientAddr.sin_port);
+
+            // Print the client's IP address and port.
+            std::cout << "Accepted a connection." << std::endl;
+            printf("Client connected from IP: %s, Port: %d\n", clientIP, clientPort);
+            // Here you may handle the client connection as needed.
+            // For demonstration, we immediately close the connection.
+            string result;
+            recv_all(client_fd, result);
+            RaftQuery raftQuery = RaftQuery::deserialize(result);
+            onReceiveRaftQuery(raftQuery);
+            close(client_fd);
         }
-        cout << "============================" << endl;
+
+        // We never reach here
+        close(replicaSockfd);
     }
 
     void onReceiveRaftQuery(RaftQuery &request)
     {
         if (!request.valid)
         {
+
             std::cerr << "Received invalid RaftQuery from sender "
                       << request.sender.slot_id << std::endl;
             return;
@@ -138,6 +224,8 @@ public:
                 onReceiveLogResponse(request.sender, request.currentTerm,
                                      request.ack, request.success);
                 break;
+            case UserRequest:
+                onReceiveUserRequest(request.request_query);
             default:
                 std::cerr << "Unknown RaftQuery message type." << std::endl;
                 break;
@@ -145,153 +233,83 @@ public:
         }
     }
 
-    void onReceiveBroadcastMessage(RequestToReplica &request)
-    {
-        cout << "Let's Broadcast message : " << operationToString(request.request.operation) << endl;
-        // if (request.op == Operation::CREATE)
-        // {
-        //     for (auto &&node : nodes)
-        //     {
-        //         RequestQuery query;
-        //         query.request_replica_id = currentLeader;
-        //         query.operation = request.op;
-        //         query.key = string(request.key, request.key_len);
-        //         query.value = string(request.val, request.val_len);
-        //         query.raft_request.reset();
-        //         query.sibling_replica_id.clear();
-
-        //     }
-        //     return;
-        // }
-        std::lock_guard<std::mutex> lock(mtx);
-        LogMessage logmsg;
-        logmsg.op = request.request.operation;
-        logmsg.key = string(request.request.key, request.request.key_len);
-        logmsg.value = string(request.request.value, request.request.value_len);
-        logmsg.replicaID = nodeId;
-        logmsg.localTime = getCurrentLocalTime();
-        if (currentRole == LEADER)
-        {
-            // Append the record to log
-            log.emplace_back(LogEntry(currentTerm, logmsg.format()));
-
-            // Acknowledge for self
-            ackedLength[nodeId.slot_id] = log.size();
-
-            // Replicate to all followers
-            for (const ReplicaID &follower : nodes)
-            {
-                if (follower.slot_id != nodeId.slot_id)
-                {
-                    replicateLog(follower);
-                }
-            }
-        }
-        else
-        {
-            // Forward to leader via FIFO (placeholder for actual networking)
-            // std::cout << "[Forwarding to Leader] "
-            //           << "LeaderID: " << currentLeader;
-
-            // TODO: Implement actual message forwarding over network
-            RequestQuery query = request.request;
-            // query.request_replica_id = currentLeader;
-            // query.operation = request.request.operation;
-            // query.key = string(request.request.key, request.request.key_len);
-            // query.value = string(request.request.value, request.request.value_len);
-            // query.raft_request.reset();
-            // query.sibling_replica_id.clear();
-            for (auto &&i : nodes)
-            {
-                if (i != currentLeader)
-                {
-                    query.sibling_replica_id.push_back(i);
-                }
-            }
-            query.sibling_replica_id.push_back(nodeId);
-            cout << "Sending request to Leader : "; currentLeader.print(); cout << endl;
-            send_all(sockfds[currentLeader], query.serialize());
-        }
-    }
-
-private:
-    ReplicaID nodeId;
-    int numPeers;
-    int currentTerm;
-    ReplicaID votedFor;
-    vector<LogEntry> log;
-    int commitLength;
-    Role currentRole;
-    ReplicaID currentLeader;
-    set<ReplicaID> votesReceived;
-    vector<int> sentLength;
-    vector<int> ackedLength;
-    vector<ReplicaID> nodes;
-    MergeTree *mt;
-    thread periodicThread;
-    mutex mtx;
-    chrono::steady_clock::time_point electionDeadline;
-    map<ReplicaID, int> sockfds;
-    RequestToReplica *request_ptr;
-    ReplyFromReplica *reply_ptr;
-    map<ReplicaID, Address> ;
-
     bool sendRaftQuery(RaftQuery &request, const ReplicaID &destination)
     {
-        // Actually need to send Request Query
-        // Properly populate the string
-        RequestQuery requestQuery;
-        requestQuery.request_replica_id = nodeId;
-        requestQuery.sibling_replica_id.clear();
-        requestQuery.operation = RAFT;
-        requestQuery.key = requestQuery.value = "";
-        requestQuery.raft_request = request;
-        string strRequestQuery = serializeRequestQuery(requestQuery);
-        return send_all(sockfds[destination], strRequestQuery);
+        string strRaftQuery = request.serialize();
+        return sendReplica(replicaInfo[destination], strRaftQuery);
     }
+    bool sendReplica(Address dest_addr, const string &msg)
+    {
+        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0)
+        {
+            perror("Socket creation failed");
+            return 1;
+        }
 
+        // Set up the destination socket address structure.
+        struct sockaddr_in serverAddr;
+        memset(&serverAddr, 0, sizeof(serverAddr));
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_port = htons(dest_addr.port);
+        if (inet_pton(AF_INET, dest_addr.host.c_str(), &serverAddr.sin_addr) <= 0)
+        {
+            perror("In RaftModule, Invalid address/ Address not supported");
+            close(sockfd);
+            return 1;
+        }
+
+        // Connect to the server.
+        if (connect(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
+        {
+            perror("Connection Failed");
+            close(sockfd);
+            return 1;
+        }
+        return send_all(sockfd, msg);
+    }
     int randomElectionTimeout()
     {
         return 300 + (rand() % 201); // 300 to 500 ms
     }
 
-    void writeToStableStorage()
-    {
-        ofstream outfile(serializeReplicaID(nodeId) + "raft_file.txt");
-        if (!outfile.is_open())
-        {
-            cerr << "Error opening raft_file.txt for writing!" << endl;
-            return;
-        }
+    // void writeToStableStorage()
+    // {
+    //     ofstream outfile(serializeReplicaID(nodeId) + "raft_file.txt");
+    //     if (!outfile.is_open())
+    //     {
+    //         cerr << "Error opening raft_file.txt for writing!" << endl;
+    //         return;
+    //     }
 
-        outfile << nodeId.slot_id << " " << nodeId.availability_zone_id << endl;
-        // Write nodeId
+    //     outfile << nodeId.slot_id << " " << nodeId.availability_zone_id << endl;
+    //     // Write nodeId
 
-        // Write currentTerm, votedFor, commitLength, numPeers
-        outfile << currentTerm << " " << votedFor << " " << commitLength << " " << numPeers << endl;
+    //     // Write currentTerm, votedFor, commitLength, numPeers
+    //     outfile << currentTerm << " " << votedFor << " " << commitLength << " " << numPeers << endl;
 
-        // Write log entries
-        outfile << log.size() << endl;
-        for (const auto &entry : log)
-        {
-            outfile << entry.term << " " << entry.msg << endl;
-        }
+    //     // Write log entries
+    //     outfile << log.size() << endl;
+    //     for (const auto &entry : log)
+    //     {
+    //         outfile << entry.term << " " << entry.msg << endl;
+    //     }
 
-        // Write nodes (followers)
-        for (const auto &f : nodes)
-            outfile << f.slot_id << " " << f.availability_zone_id << endl;
-        {
-        }
+    //     // Write nodes (followers)
+    //     for (const auto &f : nodes)
+    //         outfile << f.slot_id << " " << f.availability_zone_id << endl;
+    //     {
+    //     }
 
-        outfile.close();
-    }
+    //     outfile.close();
+    // }
 
     void runPeriodicTask()
     {
         resetElectionTimer();
         while (true)
         {
-            writeToStableStorage();
+            // writeToStableStorage();
             this_thread::sleep_for(chrono::milliseconds(100)); // wakes up periodically
 
             lock_guard<mutex> lock(mtx);
@@ -339,7 +357,7 @@ private:
                         request.suffix.clear(); // No log entries needed in the vote response
                         request.ack = 0;        // Not used in vote responses
                         request.success = 0;    // Reflecting the vote decision
-
+                        request.request_query.reset();
                         sendRaftQuery(request, other_node);
                     }
                     resetElectionTimer();
@@ -369,53 +387,53 @@ private:
         }
     }
 
-    void initState()
-    {
-        ifstream infile(serializeReplicaID(nodeId) + "raft_file.txt");
-        if (infile.good())
-            infile >> nodeId.slot_id >> nodeId.availability_zone_id;
-        {
-            infile >> currentTerm;
-            infile >> votedFor;
-            infile >> commitLength;
-            infile >> numPeers;
+    // void initState()
+    // {
+    //     ifstream infile(serializeReplicaID(nodeId) + "raft_file.txt");
+    //     if (infile.good())
+    //         infile >> nodeId.slot_id >> nodeId.availability_zone_id;
+    //     {
+    //         infile >> currentTerm;
+    //         infile >> votedFor;
+    //         infile >> commitLength;
+    //         infile >> numPeers;
 
-            int logSize;
-            infile >> logSize;
-            infile.ignore();
-            log.clear();
-            for (int i = 0; i < logSize; i++)
-            {
-                int term;
-                string msg;
-                string line;
-                getline(infile, line);
-                istringstream iss(line);
-                iss >> term;
-                getline(iss, msg);
-                if (!msg.empty() && msg[0] == ' ')
-                    msg.erase(0, 1);
-                log.push_back(LogEntry(term, msg));
-            }
+    //         int logSize;
+    //         infile >> logSize;
+    //         infile.ignore();
+    //         log.clear();
+    //         for (int i = 0; i < logSize; i++)
+    //         {
+    //             int term;
+    //             string msg;
+    //             string line;
+    //             getline(infile, line);
+    //             istringstream iss(line);
+    //             iss >> term;
+    //             getline(iss, msg);
+    //             if (!msg.empty() && msg[0] == ' ')
+    //                 msg.erase(0, 1);
+    //             log.push_back(LogEntry(term, msg));
+    //         }
 
-            nodes.clear();
-            int nodeCount = numPeers - 1;
-            for (int i = 0; i < nodeCount; i++)
-            {
-                int slot_id, availability_zone_id;
-                infile >> slot_id >> availability_zone_id;
-                nodes.push_back(ReplicaID{slot_id, availability_zone_id});
-            }
+    //         nodes.clear();
+    //         int nodeCount = numPeers - 1;
+    //         for (int i = 0; i < nodeCount; i++)
+    //         {
+    //             int slot_id, availability_zone_id;
+    //             infile >> slot_id >> availability_zone_id;
+    //             nodes.push_back(ReplicaID{slot_id, availability_zone_id});
+    //         }
 
-            sentLength = vector<int>(numPeers, 0);
-            ackedLength = vector<int>(numPeers, 0);
-            votesReceived.clear();
-            currentRole = FOLLOWER;
-            currentLeader = nullReplica;
+    //         sentLength = vector<int>(numPeers, 0);
+    //         ackedLength = vector<int>(numPeers, 0);
+    //         votesReceived.clear();
+    //         currentRole = FOLLOWER;
+    //         currentLeader = nullReplica;
 
-            infile.close();
-        }
-    }
+    //         infile.close();
+    //     }
+    // }
 
     void onReceiveVoteRequest(ReplicaID &cId, int cTerm, int cLogLength, int cLogTerm)
     {
@@ -444,8 +462,8 @@ private:
         }
         RaftQuery request;
         request.valid = true;
-        request.msg_type = VoteResponse; // Assuming VoteResponse is a valid Message enum value
-        request.sender = nodeId;         // This node is the sender of the response
+        request.msg_type = Message::VoteResponse; // Assuming VoteResponse is a valid Message enum value
+        request.sender = nodeId;                  // This node is the sender of the response
         request.currentTerm = currentTerm;
         request.lastTerm = lastTerm;
         request.prefixTerm = 0;              // Not applicable for vote responses
@@ -456,7 +474,7 @@ private:
         request.suffix.clear();        // No log entries needed in the vote response
         request.ack = 0;               // Not used in vote responses
         request.success = voteGranted; // Reflecting the vote decision
-
+        request.request_query.reset();
         sendRaftQuery(request, cId);
     }
 
@@ -520,8 +538,8 @@ private:
 
         RaftQuery request;
         request.valid = true;
-        request.msg_type = LogRequest; // Assuming LogRequest is a valid Message enum value
-        request.sender = nodeId;       // Constructing a ReplicaID from leaderId
+        request.msg_type = Message::LogRequest; // Assuming LogRequest is a valid Message enum value
+        request.sender = nodeId;                // Constructing a ReplicaID from leaderId
         request.currentTerm = currentTerm;
         request.lastTerm = (log.empty() ? 0 : log.back().term);
         request.prefixTerm = prefixTerm;
@@ -532,7 +550,7 @@ private:
         request.suffix = suffix;
         request.ack = 0;         // Not used for log replication
         request.success = false; // Not applicable for log replication
-
+        request.request_query.reset();
         sendRaftQuery(request, followerId);
     }
 
@@ -593,7 +611,7 @@ private:
             request.success = false;
             request.msg_type = LogResponse; // Assuming LogResponse is a valid Message enum value
         }
-
+        request.request_query.reset();
         sendRaftQuery(request, leaderId);
     }
 
@@ -658,19 +676,18 @@ private:
     {
         if (query.replicaID == nodeId)
         {
-            reply_ptr->reset(); // reset (if needed)
-            reply_ptr->status = status;
-
+            reply_ptr->reply.reponse_replica_id = nodeId;
+            reply_ptr->reply.status = status;
             // Copy key from query to reply_ptr.
-            reply_ptr->key_len = query.key.size();
-            memcpy(reply_ptr->key, query.key.c_str(), reply_ptr->key_len);
+            // reply_ptr->reply.key_len = query.key.size();
+            // memcpy(reply_ptr->reply.key, query.key.c_str(), reply_ptr->reply.key_len);
             // Ensure null-termination for safety.
-            reply_ptr->key[reply_ptr->key_len] = '\0';
+            // reply_ptr->key[reply_ptr->key_len] = '\0';
 
             // Copy value from query to reply_ptr.
-            reply_ptr->val_len = query.value.size();
-            memcpy(reply_ptr->val, query.value.c_str(), reply_ptr->val_len);
-            reply_ptr->val[reply_ptr->val_len] = '\0';
+            reply_ptr->reply.value_len = query.value.size();
+            memcpy(reply_ptr->reply.value, query.value.c_str(), reply_ptr->reply.value_len);
+            reply_ptr->reply.value[reply_ptr->reply.value_len] = '\0';
 
             if (sem_post(&(reply_ptr->sem)) == -1)
             {
@@ -682,7 +699,7 @@ private:
     }
     int COMMIT(const string &msg)
     {
-        LogMessage query = deserializeLogMessage(msg);
+        LogMessage query = LogMessage::deserialize(msg);
         if (query.op == Operation::DEL)
         {
             ReturnStatus status = mt->DEL(query.key);

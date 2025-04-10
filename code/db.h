@@ -46,13 +46,22 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <csignal>
+#include <sys/mman.h>
+#include <sys/shm.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <iostream>
+#include <string>
+#include <cerrno>
+#include <cstring>
 
 using namespace std;
 
 // ------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------
 #define MAX_STR_SIZE 1024 // Assume this as the maximum size of key or value
-#define JOB_REP_SHM_NAME "/jobmanager_replica_comm"
+#define JOB_REP_SHM_NAME "/jobmanager_replica_comm_"
 #define HEARTBEAT_MSSG "__HEARTBEAT__"
 #define MAX_EVENTS 10
 // Define the only delimiter allowed for serialization.
@@ -92,6 +101,8 @@ string operationToString(Operation op)
         return "DEL";
     case CREATE:
         return "CREATE";
+    case CREATE_PROPAGATE:
+        return "CREATE_PROPAGATE";
     default:
         return "UNKNOWN";
     }
@@ -435,7 +446,8 @@ enum Message
     VoteRequest,
     VoteResponse,
     LogRequest,
-    LogResponse
+    LogResponse,
+    UserRequest
 };
 
 // -------------------------------------------------------------------------------
@@ -484,6 +496,7 @@ typedef struct LogEntry
 // -------------------------------------------------------------------------------
 // RaftQuery with member functions
 
+// ---------------- RaftQuery ----------------
 typedef struct RaftQuery
 {
     bool valid;
@@ -500,6 +513,9 @@ typedef struct RaftQuery
     int ack;
     bool success;
 
+    // New member: embedded RequestQuery.
+    RequestQuery request_query;
+
     // Reset all fields.
     void reset()
     {
@@ -515,6 +531,7 @@ typedef struct RaftQuery
         suffix.clear();
         ack = 0;
         success = false;
+        request_query.reset();
     }
 
     // Print RaftQuery inside a decorative box.
@@ -545,15 +562,25 @@ typedef struct RaftQuery
         cout << "|   Ack: " << ack << "\n";
         cout << "|   Success: " << (success ? "true" : "false") << "\n";
         cout << border << "\n";
+        cout << "|   Embedded RequestQuery:\n";
+        request_query.print();
+        cout << border << "\n";
     }
 
     // Serialize RaftQuery using only DELIM.
+    // Format:
+    // <valid><DELIM><msg_type><DELIM>
+    // <sender.avz><DELIM><sender.slot><DELIM>
+    // <currentTerm><DELIM><lastTerm><DELIM><prefixTerm><DELIM><prefixLen><DELIM>
+    // <commitLength><DELIM><logLength><DELIM><granted><DELIM>
+    // <suffix_count> [for each: <DELIM><le.term><DELIM><le.msg>]
+    // <DELIM><ack><DELIM><success>
+    // <DELIM><RQ_serialized_length><DELIM><RQ_serialized_data>
     string serialize() const
     {
         stringstream ss;
         ss << (valid ? 1 : 0) << DELIM;
         ss << static_cast<int>(msg_type) << DELIM;
-        // Sender (inline: two tokens)
         ss << sender.availability_zone_id << DELIM;
         ss << sender.slot_id << DELIM;
         ss << currentTerm << DELIM;
@@ -563,13 +590,15 @@ typedef struct RaftQuery
         ss << commitLength << DELIM;
         ss << logLength << DELIM;
         ss << (granted ? 1 : 0) << DELIM;
-        // Suffix: first output count, then for each LogEntry output its two fields.
         ss << suffix.size();
         for (const auto &le : suffix)
         {
             ss << DELIM << le.term << DELIM << le.msg;
         }
         ss << DELIM << ack << DELIM << (success ? 1 : 0);
+        // Now serialize the embedded RequestQuery.
+        string rq_serialized = request_query.serialize();
+        ss << DELIM << rq_serialized.size() << DELIM << rq_serialized;
         return ss.str();
     }
 
@@ -580,7 +609,6 @@ typedef struct RaftQuery
         rq.reset();
         stringstream ss(s);
         string token;
-
         if (getline(ss, token, DELIM))
             rq.valid = (stoi(token) != 0);
         if (getline(ss, token, DELIM))
@@ -619,8 +647,18 @@ typedef struct RaftQuery
         }
         if (getline(ss, token, DELIM))
             rq.ack = stoi(token);
-        if (getline(ss, token))
+        if (getline(ss, token, DELIM))
             rq.success = (stoi(token) != 0);
+        // Deserialize the embedded RequestQuery.
+        int rq_length = 0;
+        if (getline(ss, token, DELIM))
+            rq_length = stoi(token);
+        string rq_serialized;
+        if (getline(ss, rq_serialized))
+        {
+            // rq_serialized now should have rq_length characters.
+            rq.request_query = RequestQuery::deserialize(rq_serialized);
+        }
         return rq;
     }
 } RaftQuery;
@@ -712,48 +750,6 @@ typedef struct LogMessage
 } LogMessage;
 
 // ------------------------------------------------------------------------------------------------------
-// ------------------------------------------------------------------------------------------------------
-#include "json.hpp"
-using json = nlohmann::json;
-pair<string, int> getReplicaAddr(const ReplicaID &replica)
-{
-    int az_id = replica.availability_zone_id;
-    // Load JSON from file. Adjust the filename as needed.
-    ifstream inFile("CONFIG.json");
-    if (!inFile)
-    {
-        cerr << "Unable to open file\n";
-        return make_pair("", 0);
-    }
-
-    json j;
-    inFile >> j;
-    inFile.close();
-
-    pair<string, int> addr = make_pair("", 0);
-
-    // Iterate over the nodes array in the JSON object.
-    for (const auto &node : j["nodes"])
-    {
-        // Check if the node is an availability zone and has the requested id.
-        if (node.contains("type") && node["type"] == "availability_zone" &&
-            node.contains("id") && std::stoi(node["id"].get<std::string>()) == az_id)
-        {
-            // Extract host and port from the node.
-            string host = node.value("host", "");
-            int port = stoi(node.value("port", ""));
-            addr = make_pair(host, port);
-            break;
-        }
-    }
-
-    if (addr.first.empty())
-    {
-        cout << "Availability zone with id " << az_id << " not found." << endl;
-    }
-
-    return addr;
-}
 
 // ------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------
@@ -778,7 +774,7 @@ string getCurrentLocalTime()
 // ------------------------------------------------------------------------------------------------------
 
 // Custom send_all function that sends the entire message.
-bool send_all(int sockfd, std::string message, char delimiter = '\n')
+bool send_all(int sockfd, string message, char delimiter = '\n')
 {
     message.push_back(delimiter);
     size_t total_sent = 0;
@@ -810,7 +806,7 @@ bool send_all(int sockfd, std::string message, char delimiter = '\n')
 // Custom function to receive data until a delimiter is found.
 // The result is stored in the provided string reference.
 // Returns true if the delimiter was found and data received successfully, false otherwise.
-bool recv_all(int sockfd, std::string &result, char delimiter = '\n')
+bool recv_all(int sockfd, string &result, char delimiter = '\n')
 {
     result.clear();
     char buffer[512];
@@ -827,12 +823,12 @@ bool recv_all(int sockfd, std::string &result, char delimiter = '\n')
         else if (recvd == 0)
         {
             // Connection closed before delimiter was found.
-            std::cerr << "Connection closed before receiving the complete message." << std::endl;
+            cerr << "Connection closed before receiving the complete message." << endl;
             return false;
         }
         result.append(buffer, recvd);
         // If the delimiter is found, stop reading.
-        if (result.find(delimiter) != std::string::npos)
+        if (result.find(delimiter) != string::npos)
         {
             result.pop_back();
             break;
@@ -845,7 +841,7 @@ bool recv_all(int sockfd, std::string &result, char delimiter = '\n')
 // ------------------------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------
 // Address with member functions
-struct Address
+typedef struct Address
 {
     string host;
     int port;
@@ -869,7 +865,7 @@ struct Address
     }
 
     // Deserialize from a stream (reads two tokens).
-    static Address deserializeFromStream(istream &is)
+    static Address deserialize(istream &is)
     {
         Address addr;
         string token;
@@ -879,82 +875,221 @@ struct Address
         addr.port = stoi(token);
         return addr;
     }
-};
+} Address;
+
+// ------------------------------------------------------------------------------------------------------
+#include "json.hpp"
+using json = nlohmann::json;
+Address getReplicaAddr(const ReplicaID &replica)
+{
+    int az_id = replica.availability_zone_id;
+    // Load JSON from file. Adjust the filename as needed.
+    ifstream inFile("CONFIG.json");
+    if (!inFile)
+    {
+        cerr << "Unable to open file\n";
+        return Address(); // Return a default Address with empty host and port 0.
+    }
+
+    json j;
+    inFile >> j;
+    inFile.close();
+
+    Address addr; // Default: host is empty, port is 0.
+
+    // Iterate over the nodes array in the JSON object.
+    for (const auto &node : j["nodes"])
+    {
+        // Check if the node is an availability zone and has the requested id.
+        if (node.contains("type") && node["type"] == "availability_zone" &&
+            node.contains("id") && stoi(node["id"].get<string>()) == az_id)
+        {
+            // Extract host and port from the node and store them in our Address struct.
+            addr.host = node.value("host", "");
+            addr.port = stoi(node.value("port", ""));
+            break;
+        }
+    }
+
+    if (addr.host.empty())
+    {
+        cout << "Availability zone with id " << az_id << " not found." << endl;
+    }
+
+    return addr;
+}
 
 // -------------------------------------------------------------------------------
+
 // ReplicaInfo with member functions
-struct ReplicaInfo
+typedef struct ReplicaInfo
 {
-    // Map from ReplicaID to Address.
-    map<ReplicaID, Address> replicas;
+    char replicas_str[MAX_STR_SIZE]; // Buffer to store serialized map data
+    int replicas_str_len;            // Length of the serialized data
+    sem_t sem_replica_to_jobmanager;
+    sem_t sem_jobmanager_to_replica;
 
-    // Print all pairs in a friendly format.
-    void print() const
+    // Serialize the given map into replicas_str.
+    // Format: <count><DELIM><availability_zone_id><DELIM><slot_id><DELIM><host><DELIM><port> ...
+    void serialize_map(const std::map<ReplicaID, Address> &replicas)
     {
-        cout << "ReplicaInfo:" << endl;
-        for (const auto &entry : replicas)
-        {
-            cout << "  ";
-            entry.first.print();
-            cout << " -> ";
-            entry.second.print();
-            cout << endl;
-        }
-    }
-
-    // Serialize the ReplicaInfo using only DELIM.
-    // Format: <N><DELIM>[for each entry: <az_id><DELIM><slot_id><DELIM><host><DELIM><port>]
-    string serialize() const
-    {
-        ostringstream oss;
+        std::ostringstream oss;
         oss << replicas.size();
-        // For each replica in the map, output exactly four tokens.
-        for (const auto &entry : replicas)
+        for (const auto &[rid, addr] : replicas)
         {
             oss << DELIM
-                << entry.first.availability_zone_id << DELIM
-                << entry.first.slot_id << DELIM
-                << entry.second.host << DELIM
-                << entry.second.port;
+                << rid.availability_zone_id << DELIM
+                << rid.slot_id << DELIM
+                << addr.host << DELIM
+                << addr.port;
         }
-        return oss.str();
+        std::string serialized_str = oss.str();
+        replicas_str_len = std::min(static_cast<int>(serialized_str.size())+1, static_cast<int>(MAX_STR_SIZE - 1));
+        std::memcpy(replicas_str, serialized_str.c_str(), replicas_str_len);
+        replicas_str[replicas_str_len-1] = '\0'; // Ensure null termination
     }
 
-    // Deserialize from a string using only DELIM.
-    // Must match the format as defined above.
-    static ReplicaInfo deserialize(const string &s)
+    // Deserialize a map from the replicas_str buffer.
+    std::map<ReplicaID, Address> deserialize_map() const
     {
-        ReplicaInfo info;
-        istringstream iss(s);
-        string token;
+        std::map<ReplicaID, Address> result;
+        std::istringstream ss(std::string(replicas_str, replicas_str_len));
+        std::string token;
 
-        // Read count.
+        // Read the number of entries.
         int count = 0;
-        if (getline(iss, token, DELIM))
-            count = stoi(token);
+        if (std::getline(ss, token, DELIM))
+            count = std::stoi(token);
 
-        // Loop for each entry. For each, read 4 tokens.
+        // For each entry, read the four tokens.
         for (int i = 0; i < count; i++)
         {
             ReplicaID rid;
             Address addr;
 
-            // Read ReplicaID tokens.
-            if (getline(iss, token, DELIM))
-                rid.availability_zone_id = stoi(token);
-            if (getline(iss, token, DELIM))
-                rid.slot_id = stoi(token);
-            // Read Address tokens.
-            if (getline(iss, token, DELIM))
+            if (std::getline(ss, token, DELIM))
+                rid.availability_zone_id = std::stoi(token);
+            if (std::getline(ss, token, DELIM))
+                rid.slot_id = std::stoi(token);
+            if (std::getline(ss, token, DELIM))
                 addr.host = token;
-            if (getline(iss, token, DELIM))
-                addr.port = stoi(token);
+            if (std::getline(ss, token, DELIM))
+                addr.port = std::stoi(token);
 
-            info.replicas.insert({rid, addr});
+            result[rid] = addr;
         }
-        return info;
+
+        return result;
     }
-};
+
+    // For debugging: print the deserialized map.
+    void print() const
+    {
+        auto map_rep = deserialize_map();
+        std::cout << "ReplicaInfo:" << std::endl;
+        for (const auto &entry : map_rep)
+        {
+            std::cout << "  ";
+            entry.first.print();
+            std::cout << " -> ";
+            entry.second.print();
+            std::cout << std::endl;
+        }
+    }
+} ReplicaInfo;
+// ------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------------
+
+int extractPort(const string &port_msg)
+{
+    const string prefix = "CONNECT TO PORT ";
+    size_t pos = port_msg.find(prefix);
+    if (pos == string::npos)
+    {
+        throw runtime_error("Invalid port message: prefix not found");
+    }
+    // Calculate the starting position of the port number.
+    size_t start = pos + prefix.length();
+    // Find the end of the port number (assume newline as delimiter).
+    size_t end = port_msg.find('\n', start);
+    if (end == string::npos)
+    {
+        end = port_msg.length(); // If no newline is found, take the rest of the string.
+    }
+    // Extract the port number as a substring.
+    string port_str = port_msg.substr(start, end - start);
+    // Convert the substring to an integer.
+    int port = stoi(port_str);
+    return port;
+}
+
+pair<ReplyResponse, int> sendInitialRequest(Address &addr, RequestQuery &request)
+{
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    ReplyResponse fail_response;
+    fail_response.status = ReturnStatus::FAILURE;
+    if (sockfd < 0)
+    {
+        perror("socket creation failed");
+        return make_pair(fail_response, -1);
+    }
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(addr.port);
+    if (inet_pton(AF_INET, addr.host.c_str(), &serv_addr.sin_addr) <= 0)
+    {
+        cerr << "Invalid address/ Address not supported" << endl;
+        close(sockfd);
+        return make_pair(fail_response, -1);
+    }
+
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+    {
+        perror("Connection Failed");
+        close(sockfd);
+        return make_pair(fail_response, -1);
+    }
+
+    string resp;
+    recv_all(sockfd, resp);
+
+    cout << resp << endl;
+
+    send_all(sockfd, "OK");
+
+    close(sockfd);
+
+    int new_port = extractPort(resp);
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    serv_addr.sin_port = htons(new_port);
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(new_port);
+    if (inet_pton(AF_INET, addr.host.c_str(), &serv_addr.sin_addr) <= 0)
+    {
+        cerr << "Invalid address/ Address not supported" << endl;
+        close(sockfd);
+        return make_pair(fail_response, -1);
+    }
+
+    while (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+    {
+        /* code */
+    }
+
+    recv_all(sockfd, resp);
+    cout << resp << endl;
+    
+    request.print();
+    send_all(sockfd, request.serialize());
+
+    recv_all(sockfd, resp);
+    ReplyResponse reply = ReplyResponse::deserialize(resp);
+    reply.print();
+
+    return make_pair(reply, sockfd);
+}
 
 // ------------------------------------------------------------------------------------------------------
 

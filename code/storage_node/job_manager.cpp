@@ -30,9 +30,30 @@ typedef struct ReplicaAccess
 {
     RequestToReplica *request_ptr;
     ReplyFromReplica *reply_ptr;
+    ReplicaInfo *addr_map_ptr;
+    map<ReplicaID, Address> replica_addr_map;
     sem_t sem_access;
     bool is_valid = false;
 } ReplicaAccess;
+
+string access_str;
+
+// Use an anonymous namespace to hide these pointers from other translation units.
+namespace
+{
+    void *s_req_ptr = nullptr;
+    void *s_rep_ptr = nullptr;
+    void *s_addr_map_ptr = nullptr;
+}
+
+// Call this function during initialization after mapping your shared memory,
+// so that the signal handler can later clean them up.
+void register_shm_pointers(void *req_ptr, void *rep_ptr, void *addr_map_ptr)
+{
+    s_req_ptr = req_ptr;
+    s_rep_ptr = rep_ptr;
+    s_addr_map_ptr = addr_map_ptr;
+}
 
 class JobManager
 {
@@ -42,7 +63,7 @@ public:
         replica_map.clear();
     }
     ~JobManager()
-    { 
+    {
         if (main_socket_fd != -1)
         {
             close(main_socket_fd);
@@ -202,6 +223,9 @@ private:
                         close(dedicated_fd);
                         continue;
                     }
+
+                    cout << ok_buffer << endl;
+
                     if (ok_buffer != "OK")
                     {
                         // No valid OK received; terminate.
@@ -241,6 +265,8 @@ private:
             close(dedicated_fd);
             return;
         }
+
+        cout << "Just before ready" << endl;
 
         close(dedicated_fd);
 
@@ -335,17 +361,113 @@ private:
     ReturnStatus process_request(const string &request_str, int client_fd)
     {
         RequestQuery request = RequestQuery::deserialize(request_str);
-        if (request.operation == Operation::CREATE_PROPAGATE)
-        {
-        }
-        else if (request.operation == Operation::CREATE)
+        ReplyResponse reply;
+        if (request.operation == Operation::CREATE_PROPAGATE || request.operation == Operation::CREATE)
         {
             // Create a replica for the first time
-            ReplyResponse reply;
             reply.status = create_replica(request.request_replica_id, request.sibling_replica_id);
-            reply.reponse_replica_id = request.request_replica_id;
-            reply.request_id = request.request_id;
-            process_reply(reply, client_fd);
+            // Wait for replica Machine to give its address info
+            if (sem_wait(&(replica_map[request.request_replica_id.slot_id].addr_map_ptr->sem_replica_to_jobmanager)) == -1)
+            {
+                perror("At JobManager, sem_wait");
+                return ReturnStatus::FAILURE;
+            }
+
+            replica_map[request.request_replica_id.slot_id].replica_addr_map = replica_map[request.request_replica_id.slot_id].addr_map_ptr->deserialize_map();
+            if (request.operation == Operation::CREATE_PROPAGATE)
+            {
+                // Ask other AZs to create the sibling replicas
+                request.sibling_replica_id.push_back(request.request_replica_id);
+                RequestQuery sibling_request = request;
+                sibling_request.operation = Operation::CREATE;
+                vector<int> sibling_sockfd_list;
+
+                for (auto replica_id : request.sibling_replica_id)
+                {
+                    if (replica_id == request.request_replica_id)
+                        continue;
+
+                    sibling_request.request_replica_id = replica_id;
+                    vector<ReplicaID> sibling_sibling_replica_id;
+                    for (auto rr : request.sibling_replica_id)
+                    {
+                        if (rr == replica_id)
+                            continue;
+                        sibling_sibling_replica_id.push_back(rr);
+                    }
+                    sibling_request.sibling_replica_id = sibling_sibling_replica_id;
+
+                    Address sibling_addr = getReplicaAddr(replica_id);
+
+                    pair<ReplyResponse, int> res = sendInitialRequest(sibling_addr, sibling_request);
+
+                    sibling_sockfd_list.push_back(res.second);
+                    ReplyResponse &response = res.first;
+
+                    ReplicaInfo sibling_info;
+                    sibling_info.replicas_str_len = response.value_len;
+                    memcpy(sibling_info.replicas_str, response.value, response.value_len);
+                    // sibling_info.print();
+                    replica_map[request.request_replica_id.slot_id].replica_addr_map[replica_id] = sibling_info.deserialize_map()[replica_id];
+                }
+                request.sibling_replica_id.pop_back();
+
+                cout << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" << endl;
+                cout << "Replica Map created at Propagator:" << endl;
+                for(auto &item: replica_map[request.request_replica_id.slot_id].replica_addr_map)
+                {
+                    item.first.print(); cout << " -> "; item.second.print(); cout << endl;
+                }
+                cout << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" << endl;
+                // Now I have the entire map info with me (propagator)
+                // I have to give this map to my replica
+                // Finally I have to send this map to every sibling
+                ReplicaInfo all_map;
+                all_map.serialize_map(replica_map[request.request_replica_id.slot_id].replica_addr_map);
+                ReplyResponse response;
+                response.value_len = all_map.replicas_str_len;
+                memcpy(response.value, all_map.replicas_str, response.value_len);
+                for (auto sibling_sockfd : sibling_sockfd_list)
+                {
+                    send_all(sibling_sockfd, response.serialize());
+
+                    close(sibling_sockfd);
+                }
+
+                replica_map[request.request_replica_id.slot_id].addr_map_ptr->replicas_str_len = all_map.replicas_str_len;
+                memcpy(replica_map[request.request_replica_id.slot_id].addr_map_ptr->replicas_str, all_map.replicas_str, all_map.replicas_str_len);
+            }
+            else
+            {
+                // In case of create I just to reply with a status and with the my own replica address info to the Propagator
+                // Then I have to wait for the Propagator to send address info of all other siblings
+
+                // Send the status and my own replica address to the propagator
+                reply.reponse_replica_id = request.request_replica_id;
+                reply.request_id = request.request_id;
+                reply.value_len = replica_map[request.request_replica_id.slot_id].addr_map_ptr->replicas_str_len;
+                memcpy(reply.value, replica_map[request.request_replica_id.slot_id].addr_map_ptr->replicas_str, reply.value_len);
+
+                process_reply(reply, client_fd);
+
+                // Now I wait for the propagator to send me the complete map
+                string response_str;
+                recv_all(client_fd, response_str);
+                ReplyResponse response = ReplyResponse::deserialize(response_str);
+
+                response.print();
+
+                replica_map[request.request_replica_id.slot_id].addr_map_ptr->replicas_str_len = response.value_len;
+                memcpy(replica_map[request.request_replica_id.slot_id].addr_map_ptr->replicas_str, response.value, response.value_len);
+
+            }
+            // Provide the replica machine with info of all its sibling to my own repplica
+            if (sem_post(&replica_map[request.request_replica_id.slot_id].addr_map_ptr->sem_jobmanager_to_replica) == -1)
+            {
+                perror("At JobManager, sem_post");
+                return ReturnStatus::FAILURE;
+            }
+            reply.status = ReturnStatus::SUCCESS;
             replica_map[request.request_replica_id.slot_id].is_valid = true;
         }
         else
@@ -384,10 +506,8 @@ private:
                 perror("At JobManager, sem_post");
                 return ReturnStatus::FAILURE;
             }
-
-            return process_reply(reply, client_fd);
         }
-        return ReturnStatus::SUCCESS;
+        return process_reply(reply, client_fd);
     }
 
     // Fork a new process to run the replica machine.
@@ -400,15 +520,20 @@ private:
         }
 
         // Initialize the shared memories and semaphores for the replica
-        string access_str = JOB_REP_SHM_NAME + to_string(own_replica.slot_id);
+        access_str = JOB_REP_SHM_NAME + own_replica.serialize();
 
-        int req_shm_fd, rep_shm_fd;
+        int req_shm_fd, rep_shm_fd, addr_map_shm_fd;
         if ((req_shm_fd = shm_open((access_str + "req").c_str(), O_CREAT | O_RDWR, 0777)) == -1)
         {
             perror("At JobManager, shm_open");
             return ReturnStatus::FAILURE;
         }
         if ((rep_shm_fd = shm_open((access_str + "rep").c_str(), O_CREAT | O_RDWR, 0777)) == -1)
+        {
+            perror("At JobManager, shm_open");
+            return ReturnStatus::FAILURE;
+        }
+        if ((addr_map_shm_fd = shm_open((access_str + "addr_map").c_str(), O_CREAT | O_RDWR, 0777)) == -1)
         {
             perror("At JobManager, shm_open");
             return ReturnStatus::FAILURE;
@@ -424,6 +549,11 @@ private:
             perror("At JobManager, ftruncate");
             return ReturnStatus::FAILURE;
         }
+        if (ftruncate(addr_map_shm_fd, sizeof(ReplicaInfo)) == -1)
+        {
+            perror("At JobManager, ftruncate");
+            return ReturnStatus::FAILURE;
+        }
 
         // Map the shared memory region.
         void *req_ptr = mmap(nullptr, sizeof(RequestToReplica), PROT_READ | PROT_WRITE, MAP_SHARED, req_shm_fd, 0);
@@ -433,13 +563,25 @@ private:
             return ReturnStatus::FAILURE;
         }
         replica_map[own_replica.slot_id].request_ptr = static_cast<RequestToReplica *>(req_ptr);
-        void *rep_ptr = mmap(nullptr, sizeof(RequestToReplica), PROT_READ | PROT_WRITE, MAP_SHARED, rep_shm_fd, 0);
+
+        void *rep_ptr = mmap(nullptr, sizeof(ReplyFromReplica), PROT_READ | PROT_WRITE, MAP_SHARED, rep_shm_fd, 0);
         if (rep_ptr == MAP_FAILED)
         {
             perror("At JobManager, mmap");
             return ReturnStatus::FAILURE;
         }
         replica_map[own_replica.slot_id].reply_ptr = static_cast<ReplyFromReplica *>(rep_ptr);
+
+        void *addr_map_shm_ptr = mmap(nullptr, sizeof(ReplicaInfo), PROT_READ | PROT_WRITE, MAP_SHARED, addr_map_shm_fd, 0);
+        if (addr_map_shm_ptr == MAP_FAILED)
+        {
+            perror("At JobManager, mmap");
+            return ReturnStatus::FAILURE;
+        }
+        replica_map[own_replica.slot_id].addr_map_ptr = static_cast<ReplicaInfo *>(addr_map_shm_ptr);
+
+
+        register_shm_pointers(req_ptr, rep_ptr, addr_map_shm_ptr);
 
         // Initialize the POSIX semaphore for process sharing with an initial value of 1.
         if (sem_init(&replica_map[own_replica.slot_id].request_ptr->sem, 1, 0) == -1)
@@ -452,7 +594,16 @@ private:
             perror("At JobManager, sem_init");
             return ReturnStatus::FAILURE;
         }
-
+        if (sem_init(&replica_map[own_replica.slot_id].addr_map_ptr->sem_jobmanager_to_replica, 1, 0) == -1)
+        {
+            perror("At JobManager, sem_init");
+            return ReturnStatus::FAILURE;
+        }
+        if (sem_init(&replica_map[own_replica.slot_id].addr_map_ptr->sem_replica_to_jobmanager, 1, 0) == -1)
+        {
+            perror("At JobManager, sem_init");
+            return ReturnStatus::FAILURE;
+        }
         if (sem_init(&replica_map[own_replica.slot_id].sem_access, 1, 1) == -1)
         {
             perror("At JobManager, sem_init");
@@ -460,6 +611,7 @@ private:
         }
 
         // To be send: own_replica, sibling_replica
+        // std::cout << "Preparing to fork..." << std::endl;
         pid_t pid = fork();
         if (pid < 0)
         {
@@ -474,6 +626,9 @@ private:
             execl("./storage_node/replica_machine.out", "./storage_node/replica_machine.out", own_replica.serialize().c_str(), sibling_replica.serialize().c_str(), (char *)NULL);
             perror("At Jobmanager, execl failed");
             exit(EXIT_FAILURE);
+        }
+        else
+        {
         }
         return ReturnStatus::SUCCESS;
     }
@@ -490,6 +645,81 @@ private:
     }
 };
 
+// Cleanup function that unmaps and unlinks the shared memory regions.
+// It builds the shared memory names from g_access_str.
+bool cleanup_shared_memory()
+{
+    constexpr size_t REQ_SIZE = sizeof(RequestToReplica);
+    constexpr size_t REP_SIZE = sizeof(ReplyFromReplica);
+    constexpr size_t ADDR_MAP_SIZE = sizeof(ReplicaInfo);
+
+    bool all_success = true;
+
+    // Unmap the shared memory regions if they were mapped.
+    if (s_req_ptr)
+    {
+        if (munmap(s_req_ptr, REQ_SIZE) == -1)
+        {
+            std::cerr << "munmap req_ptr failed: " << std::strerror(errno) << std::endl;
+            all_success = false;
+        }
+        s_req_ptr = nullptr;
+    }
+    if (s_rep_ptr)
+    {
+        if (munmap(s_rep_ptr, REP_SIZE) == -1)
+        {
+            std::cerr << "munmap rep_ptr failed: " << std::strerror(errno) << std::endl;
+            all_success = false;
+        }
+        s_rep_ptr = nullptr;
+    }
+    if (s_addr_map_ptr)
+    {
+        if (munmap(s_addr_map_ptr, ADDR_MAP_SIZE) == -1)
+        {
+            std::cerr << "munmap addr_map_ptr failed: " << std::strerror(errno) << std::endl;
+            all_success = false;
+        }
+        s_addr_map_ptr = nullptr;
+    }
+
+    // Build the complete shared memory names.
+    std::string req_name = (access_str[0] == '/' ? access_str : "/" + access_str) + "req";
+    std::string rep_name = (access_str[0] == '/' ? access_str : "/" + access_str) + "rep";
+    std::string addr_map_name = (access_str[0] == '/' ? access_str : "/" + access_str) + "addr_map";
+
+    // Unlink (delete) the shared memory objects.
+    if (shm_unlink(req_name.c_str()) == -1)
+    {
+        std::cerr << "shm_unlink " << req_name << " failed: " << std::strerror(errno) << std::endl;
+        all_success = false;
+    }
+    if (shm_unlink(rep_name.c_str()) == -1)
+    {
+        std::cerr << "shm_unlink " << rep_name << " failed: " << std::strerror(errno) << std::endl;
+        all_success = false;
+    }
+    if (shm_unlink(addr_map_name.c_str()) == -1)
+    {
+        std::cerr << "shm_unlink " << addr_map_name << " failed: " << std::strerror(errno) << std::endl;
+        all_success = false;
+    }
+
+    return all_success;
+}
+
+// Signal handler for SIGINT (Control+C).
+// Only g_access_str is required globally; the shared memory pointers are accessed via static variables.
+void signal_handler(int signum)
+{
+    // For simplicity we use std::cerr here, but note that in production you should keep the handler async‑signal‑safe.
+    std::cerr << "\nReceived signal " << signum << ", cleaning up shared memory..." << std::endl;
+    cleanup_shared_memory();
+    _exit(0); // _exit() is async-signal-safe.
+}
+
+
 int main(int argc, char *argv[])
 {
     try
@@ -498,6 +728,32 @@ int main(int argc, char *argv[])
         {
             cerr << "Error at JobManager: incomplete arguments" << endl;
             return EXIT_FAILURE;
+        }
+
+        // // Open the output file in write mode. This creates the file if it doesn't exist
+        // // and truncates it to zero length if it already exists.
+        // std::ofstream file("job_manager_output.txt", std::ios::out | std::ios::trunc);
+        // if (!file.is_open())
+        // {
+        //     std::cerr << "Error: Could not open output.txt for writing." << std::endl;
+        //     return 1;
+        // }
+
+        // // Save the original stream buffer of cout.
+        // std::streambuf *originalCoutBuffer = std::cout.rdbuf();
+
+        // // Redirect cout's output to the file.
+        // std::cout.rdbuf(file.rdbuf());
+
+        // Register the SIGINT signal handler.
+        struct sigaction sa;
+        sa.sa_handler = signal_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0; // You might use SA_RESTART if needed.
+        if (sigaction(SIGINT, &sa, nullptr) == -1)
+        {
+            std::cerr << "Failed to set signal handler: " << std::strerror(errno) << std::endl;
+            return 1;
         }
 
         int availability_zone_id = stoi(argv[1]);

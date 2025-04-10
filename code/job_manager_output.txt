@@ -1,0 +1,6 @@
+JobManager for AZ0 listening on port 7000
+Accepted connection from 127.0.0.1
+Preparing to fork...
+I am here alone
+Line 344
+Preparing to fork...
