@@ -449,6 +449,24 @@ enum Message
     LogResponse,
     UserRequest
 };
+std::string messageToString(Message msg)
+{
+    switch (msg)
+    {
+    case VoteRequest:
+        return "VoteRequest";
+    case VoteResponse:
+        return "VoteResponse";
+    case LogRequest:
+        return "LogRequest";
+    case LogResponse:
+        return "LogResponse";
+    case UserRequest:
+        return "UserRequest";
+    default:
+        return "Unknown Message";
+    }
+}
 
 // -------------------------------------------------------------------------------
 // LogEntry with member functions
@@ -541,7 +559,7 @@ typedef struct RaftQuery
         cout << border << "\n";
         cout << "| RaftQuery:\n";
         cout << "|   Valid: " << (valid ? "true" : "false") << "\n";
-        cout << "|   Message Type: " << static_cast<int>(msg_type) << "\n";
+        cout << "|   Message Type: " << messageToString(msg_type) << "\n";
         cout << "|   Sender: ";
         sender.print();
         cout << "\n";

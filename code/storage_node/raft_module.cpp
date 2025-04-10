@@ -481,8 +481,12 @@ private:
 
     void onReceiveVoteResponse(ReplicaID &voterId, int term, bool granted)
     {
+        cout<<"Processing Vote Response"<<endl;
         if (currentRole == CANDIDATE && term == currentTerm && granted)
         {
+            cout<<"Yeah, I got a vote from ";
+            voterId.print();
+            cout<<endl;
             votesReceived.insert(voterId);
             if ((votesReceived.size() + 1) >= (numPeers / 2 + 1))
             {
@@ -499,6 +503,7 @@ private:
         }
         else if (term > currentTerm)
         {
+            cout << "I am outdated"<<endl;
             currentTerm = term;
             currentRole = FOLLOWER;
             votedFor = nullReplica;
