@@ -144,7 +144,9 @@ public:
             replica_addr_map = addr_map_ptr->deserialize_map();
 
             cout << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" << endl;
-            cout << "Replica Map received at ReplicaMachine "; replica_id.print(); cout << endl;
+            cout << "Replica Map received at ReplicaMachine ";
+            replica_id.print();
+            cout << endl;
             for (auto &item : replica_addr_map)
             {
                 item.first.print();
@@ -175,16 +177,28 @@ private:
     // Main event loop (to be implemented)
     int run(int sockfd)
     {
-        raft_machine = new Raft(replica_id, sibling_replica_id.size() + 1, sibling_replica_id, reply_ptr, sockfd, replica_addr_map);
+        string file_name = to_string(replica_id.availability_zone_id) + "_" + to_string(replica_id.slot_id) + ".txt";
+        std::ofstream outFile(file_name, std::ios::out | std::ios::trunc);
+        if (!outFile)
+        {
+            std::cerr << "Error opening file for output.\n";
+            return 1;
+        }
+        std::streambuf *coutbuf = std::cout.rdbuf(); // optionally save old buffer if you plan to restore it later
+        std::cout.rdbuf(outFile.rdbuf());
+        // raft_machine = new Raft(replica_id, sibling_replica_id.size() + 1, sibling_replica_id, reply_ptr, sockfd, replica_addr_map);
         while (true)
         {
             // wait for the request to come
+            cout << "We are inside the file" << endl;
             if (sem_wait(&(request_ptr->sem)) == -1)
             {
                 perror("At ReplicaMachine, sem_wait");
                 return EXIT_FAILURE;
             }
-            raft_machine->onReceiveUserRequest(request_ptr->request);
+            cout << "Received request from JobManager" << endl;
+            request_ptr->request.print();
+            // raft_machine->onReceiveUserRequest(request_ptr->request);
         }
         return EXIT_SUCCESS;
     }

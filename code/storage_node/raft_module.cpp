@@ -1,6 +1,9 @@
 #include "../db.h"
 #include "lsm.cpp" // External functions: start_compaction(), SET(), GET(), DEL()
 
+#define MIN_ELECTION_TIMEOUT 4000 // milliseconds
+#define MAX_ELECTION_TIMEOUT 8000 // milliseconds
+#define WAKEUP_TIME 1000          // milliseconds
 class Raft
 {
 public:
@@ -39,51 +42,61 @@ public:
         // Will implement later
         delete mt;
     }
-    // void print() const
-    // {
-    //     cout << "nodeId         : (" << nodeId.slot_id << ", " << nodeId.availability_zone_id << ")" << endl;
-    //     cout << "======== Raft State ========" << endl;
-    //     cout << "numPeers       : " << numPeers << endl;
-    //     cout << "currentTerm    : " << currentTerm << endl;
-    //     cout << "votedFor       : " << votedFor.serialize() << endl;
-    //     cout << "commitLength   : " << commitLength << endl;
-    //     cout << "currentRole    : " << roleToString(currentRole) << endl;
-    //     cout << "currentLeader  : " << currentLeader.serialize() << endl;
+    void print() const
+    {
+        cout << "nodeId         : (" << nodeId.slot_id << ", " << nodeId.availability_zone_id << ")" << endl;
+        cout << "======== Raft State ========" << endl;
+        cout << "numPeers       : " << numPeers << endl;
+        cout << "currentTerm    : " << currentTerm << endl;
+        cout << "votedFor       : ";
+        votedFor.print();
+        cout << endl;
+        cout << "commitLength   : " << commitLength << endl;
+        cout << "currentRole    : " << roleToString(currentRole) << endl;
+        cout << "currentLeader  : ";
+        currentLeader.print();
+        cout << endl;
 
-    //     cout << "votesReceived  : { ";
-    //     for (ReplicaID vote : votesReceived)
-    //         cout << vote.serialize() << " ";
-    //     cout << "}" << endl;
+        cout << "votesReceived  : { ";
+        for (ReplicaID vote : votesReceived)
+        {
+            vote.print();
+            cout << " ";
+        }
+        cout << "}" << endl;
 
-    //     cout << "sentLength     : [ ";
-    //     for (int s : sentLength)
-    //         cout << s << " ";
-    //     cout << "]" << endl;
+        cout << "sentLength     : [ ";
+        for (int s : sentLength)
+            cout << s << " ";
+        cout << "]" << endl;
 
-    //     cout << "ackedLength    : [ ";
-    //     for (int a : ackedLength)
-    //         cout << a << " ";
-    //     cout << "]" << endl;
+        cout << "ackedLength    : [ ";
+        for (int a : ackedLength)
+            cout << a << " ";
+        cout << "]" << endl;
 
-    //     cout << "Log Entries:" << endl;
-    //     for (size_t i = 0; i < log.size(); i++)
-    //     {
-    //         cout << "  [" << i << "] Term: " << log[i].term
-    //              << ", Msg: " << log[i].msg << endl;
-    //     }
+        cout << "Log Entries:" << endl;
+        for (size_t i = 0; i < log.size(); i++)
+        {
+            cout << "  [" << i << "] Term: " << log[i].term
+                 << ", Msg: " << log[i].msg << endl;
+        }
 
-    //     cout << "Nodes:" << endl;
-    //     for (size_t i = 0; i < nodes.size(); i++)
-    //     {
-    //         cout << "  Node " << i << " -> slot_id: " << nodes[i].slot_id << ", availability_zone_id: " << nodes[i].availability_zone_id << endl;
-    //     }
-    //     cout << "============================" << endl;
-    // }
+        cout << "Nodes:" << endl;
+        for (size_t i = 0; i < nodes.size(); i++)
+        {
+            cout << "  Node " << i << " -> slot_id: " << nodes[i].slot_id << ", availability_zone_id: " << nodes[i].availability_zone_id << endl;
+        }
+        cout << "============================" << endl;
+    }
 
     void onReceiveUserRequest(RequestQuery &request)
     {
         /////// Need to fix !!!!
         std::lock_guard<std::mutex> lock(mtx);
+        cout << "Received User Request" << endl;
+        request.print();
+        cout << endl;
         LogMessage logmsg;
         logmsg.op = request.operation;
         logmsg.key = string(request.key, request.key_len);
@@ -137,6 +150,7 @@ private:
     thread periodicThread;
     mutex mtx;
     chrono::steady_clock::time_point electionDeadline;
+    chrono::steady_clock::time_point heartBeatDeadline;
     RequestToReplica *request_ptr;
     ReplyFromReplica *reply_ptr;
     map<ReplicaID, Address> replicaInfo;
@@ -236,6 +250,10 @@ private:
 
     bool sendRaftQuery(RaftQuery &request, const ReplicaID &destination)
     {
+        cout << "Sending RaftQuery to destination: ";
+        request.print();
+        cout << "Destination: ";
+        destination.print();
         string strRaftQuery = request.serialize();
         return sendReplica(replicaInfo[destination], strRaftQuery);
     }
@@ -263,17 +281,19 @@ private:
         // Connect to the server.
         if (connect(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
         {
+            cout << "Error connecting to server: " << dest_addr.host << ":" << dest_addr.port << endl;
             perror("Connection Failed");
             close(sockfd);
             return 1;
         }
-        return send_all(sockfd, msg);
+        bool done = send_all(sockfd, msg);
+        close(sockfd);
+        return done;
     }
     int randomElectionTimeout()
     {
-        return 300 + (rand() % 201); // 300 to 500 ms
+        return MIN_ELECTION_TIMEOUT + (rand() % (MAX_ELECTION_TIMEOUT - MIN_ELECTION_TIMEOUT)); // 300 to 500 ms
     }
-
     // void writeToStableStorage()
     // {
     //     ofstream outfile(serializeReplicaID(nodeId) + "raft_file.txt");
@@ -311,57 +331,63 @@ private:
         while (true)
         {
             // writeToStableStorage();
-            this_thread::sleep_for(chrono::milliseconds(100)); // wakes up periodically
-
-            lock_guard<mutex> lock(mtx);
-            if (currentRole == LEADER)
+            this_thread::sleep_for(chrono::milliseconds(WAKEUP_TIME)); // wakes up periodically
+            print();
             {
-                for (const ReplicaID &follower : nodes)
+                // lock_guard<mutex> lock(mtx);
+                cout << "Periodic task running..." << endl;
+                if (currentRole == LEADER)
                 {
-                    if (follower.slot_id != nodeId.slot_id)
+                    cout << "Periodic task running...1 ...... REPLICATING LOG" << endl;
+                    for (const ReplicaID &follower : nodes)
                     {
-                        replicateLog(follower);
+                        if (follower.slot_id != nodeId.slot_id)
+                        {
+                            replicateLog(follower);
+                        }
                     }
                 }
-            }
-            else
-            {
-                if (chrono::steady_clock::now() >= electionDeadline)
+                else
                 {
-                    currentTerm += 1;
-                    currentRole = CANDIDATE;
-                    votedFor = nodeId;
-                    votesReceived.clear();
-                    votesReceived.insert(nodeId);
-
-                    int lastTerm = 0;
-                    if (!log.empty())
-                        lastTerm = log.back().term;
-
-                    // cout << "Election timeout: starting election for term " << currentTerm << endl;
-                    // cout << "Sending VoteRequest: (VoteRequest, " << nodeId.slot_id << ", "
-                    //      << currentTerm << ", " << log.size() << ", " << lastTerm << ")" << endl;
-                    for (const ReplicaID &other_node : nodes)
+                    cout << "Periodic task running...3 .... Not a leader" << endl;
+                    if (chrono::steady_clock::now() >= electionDeadline)
                     {
-                        // cout << "   Sending VoteRequest to node " << ReplicaID.slot_id << endl;
-                        RaftQuery request;
-                        request.valid = true;
-                        request.msg_type = VoteRequest; // Assuming VoteResponse is a valid Message enum value
-                        request.sender = nodeId;        // This node is the sender of the response
-                        request.currentTerm = currentTerm;
-                        request.lastTerm = lastTerm;
-                        request.prefixTerm = 0;              // Not applicable for vote responses
-                        request.prefixLen = 0;               // Not applicable for vote responses
-                        request.commitLength = commitLength; // Assuming commitLength is a defined member variable
-                        request.logLength = log.size();
-                        request.granted = 0;
-                        request.suffix.clear(); // No log entries needed in the vote response
-                        request.ack = 0;        // Not used in vote responses
-                        request.success = 0;    // Reflecting the vote decision
-                        request.request_query.reset();
-                        sendRaftQuery(request, other_node);
+                        cout << "Deadline expired ..... Starting a Leader Election" << endl;
+                        resetElectionTimer();
+                        currentTerm += 1;
+                        currentRole = CANDIDATE;
+                        votedFor = nodeId;
+                        votesReceived.clear();
+                        votesReceived.insert(nodeId);
+
+                        int lastTerm = 0;
+                        if (!log.empty())
+                            lastTerm = log.back().term;
+
+                        // cout << "Election timeout: starting election for term " << currentTerm << endl;
+                        // cout << "Sending VoteRequest: (VoteRequest, " << nodeId.slot_id << ", "
+                        //      << currentTerm << ", " << log.size() << ", " << lastTerm << ")" << endl;
+                        for (const ReplicaID &other_node : nodes)
+                        {
+                            // cout << "   Sending VoteRequest to node " << ReplicaID.slot_id << endl;
+                            RaftQuery request;
+                            request.valid = true;
+                            request.msg_type = VoteRequest; // Assuming VoteResponse is a valid Message enum value
+                            request.sender = nodeId;        // This node is the sender of the response
+                            request.currentTerm = currentTerm;
+                            request.lastTerm = lastTerm;
+                            request.prefixTerm = 0;              // Not applicable for vote responses
+                            request.prefixLen = 0;               // Not applicable for vote responses
+                            request.commitLength = commitLength; // Assuming commitLength is a defined member variable
+                            request.logLength = log.size();
+                            request.granted = 0;
+                            request.suffix.clear(); // No log entries needed in the vote response
+                            request.ack = 0;        // Not used in vote responses
+                            request.success = 0;    // Reflecting the vote decision
+                            request.request_query.reset();
+                            sendRaftQuery(request, other_node);
+                        }
                     }
-                    resetElectionTimer();
                 }
             }
         }
@@ -444,7 +470,6 @@ private:
             currentRole = FOLLOWER;
             votedFor = nullReplica;
         }
-
         int lastTerm = 0;
         if (!log.empty())
             lastTerm = log.back().term;
@@ -481,12 +506,12 @@ private:
 
     void onReceiveVoteResponse(ReplicaID &voterId, int term, bool granted)
     {
-        cout<<"Processing Vote Response"<<endl;
+        cout << "Processing Vote Response" << endl;
         if (currentRole == CANDIDATE && term == currentTerm && granted)
         {
-            cout<<"Yeah, I got a vote from ";
+            cout << "Yeah, I got a vote from ";
             voterId.print();
-            cout<<endl;
+            cout << endl;
             votesReceived.insert(voterId);
             if ((votesReceived.size() + 1) >= (numPeers / 2 + 1))
             {
@@ -503,7 +528,7 @@ private:
         }
         else if (term > currentTerm)
         {
-            cout << "I am outdated"<<endl;
+            cout << "I am outdated" << endl;
             currentTerm = term;
             currentRole = FOLLOWER;
             votedFor = nullReplica;
@@ -705,7 +730,9 @@ private:
     }
     int COMMIT(const string &msg)
     {
+        cout << "COMMittting ***************************************" << endl;
         LogMessage query = LogMessage::deserialize(msg);
+        query.print();
         if (query.op == Operation::DEL)
         {
             ReturnStatus status = mt->DEL(query.key);
