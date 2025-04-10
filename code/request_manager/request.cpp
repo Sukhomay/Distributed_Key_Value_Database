@@ -158,7 +158,7 @@ int main()
     RequestQuery req;
     req.operation = Operation::CREATE_PROPAGATE;
     req.request_replica_id = ReplicaID{0, 3};
-    req.sibling_replica_id.push_back(ReplicaID{1, 4});
+    // req.sibling_replica_id.push_back(ReplicaID{1, 4});
 
     req.print();
     send_all(sockfd, req.serialize());
@@ -170,7 +170,7 @@ int main()
     reply_resp.print();
 
     req.operation = Operation::SET;
-    req.request_replica_id = ReplicaID{0, 2};
+    req.request_replica_id = ReplicaID{0, 3};
     req.key_len = req.value_len = 3;
     memcpy(req.key, "aaa", 3);
     memcpy(req.value, "AAA", 3);
@@ -183,7 +183,7 @@ int main()
     reply_resp.print();
 
     req.operation = Operation::SET;
-    req.request_replica_id = ReplicaID{0, 2};
+    req.request_replica_id = ReplicaID{0, 3};
     req.key_len = req.value_len = 3;
     memcpy(req.key, "ccc", 3);
     memcpy(req.value, "CCC", 3);
@@ -196,7 +196,7 @@ int main()
     reply_resp.print();
 
     req.operation = Operation::GET;
-    req.request_replica_id = ReplicaID{0, 2};
+    req.request_replica_id = ReplicaID{0, 3};
     req.key_len = 3;
     memcpy(req.key, "aaa", 3);
 
@@ -208,7 +208,7 @@ int main()
     reply_resp.print();
 
     req.operation = Operation::GET;
-    req.request_replica_id = ReplicaID{0, 2};
+    req.request_replica_id = ReplicaID{0, 3};
     req.key_len = 3;
     memcpy(req.key, "bbb", 3);
 
@@ -220,7 +220,7 @@ int main()
     reply_resp.print();
 
     req.operation = Operation::DEL;
-    req.request_replica_id = ReplicaID{0, 2};
+    req.request_replica_id = ReplicaID{0, 3};
     req.key_len = 3;
     memcpy(req.key, "ccc", 3);
 
@@ -232,7 +232,7 @@ int main()
     reply_resp.print();
 
     req.operation = Operation::GET;
-    req.request_replica_id = ReplicaID{0, 2};
+    req.request_replica_id = ReplicaID{0, 3};
     req.key_len = 3;
     memcpy(req.key, "ccc", 3);
 

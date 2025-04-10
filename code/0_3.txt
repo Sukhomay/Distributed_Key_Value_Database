@@ -1,1 +1,12 @@
 We are inside the file
+Received request from JobManager
++--------------------------------------------------------+
+| RequestQuery:
+|   Request Replica: (0, 3)
+|   Other Replicas (0):
+|   Request ID: 4294967296
+|   Operation: SET
+|   Key: aaa
+|   Value: AAA
++--------------------------------------------------------+
+We are inside the file

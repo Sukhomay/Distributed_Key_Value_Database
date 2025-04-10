@@ -343,6 +343,9 @@ private:
                         heartbeat_sent = false;
                         continue;
                     }
+
+                    cout << request << endl;
+
                     if (process_request(request, client_fd) == ReturnStatus::FAILURE)
                     {
                         cerr << "Could not process request" << endl;
@@ -361,6 +364,7 @@ private:
     ReturnStatus process_request(const string &request_str, int client_fd)
     {
         RequestQuery request = RequestQuery::deserialize(request_str);
+
         ReplyResponse reply;
         if (request.operation == Operation::CREATE_PROPAGATE || request.operation == Operation::CREATE)
         {
@@ -486,8 +490,10 @@ private:
                 return ReturnStatus::FAILURE;
             }
 
+            
             replica_map[request.request_replica_id.slot_id].request_ptr->request = request;
-
+            
+            replica_map[request.request_replica_id.slot_id].request_ptr->request.print();
             if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
             {
                 perror("At JobManager, sem_post");
