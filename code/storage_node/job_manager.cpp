@@ -266,8 +266,6 @@ private:
             return;
         }
 
-        cout << "Just before ready" << endl;
-
         close(dedicated_fd);
 
         // Send READY message to the client.
@@ -303,7 +301,7 @@ private:
         // Communication loop: receive client requests and send heartbeat if necessary.
         while (true)
         {
-            int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 5000); // 5000ms timeout.
+            int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 500000); // 5000ms timeout.
             if (nfds < 0)
             {
                 perror("epoll_wait");
@@ -323,6 +321,7 @@ private:
                     perror("send_all() heartbeat");
                     break;
                 }
+                cout << "HeartBeat mssg sent" << endl;
                 continue;
             }
             for (int i = 0; i <= nfds; i++)
@@ -344,7 +343,6 @@ private:
                         continue;
                     }
 
-                    cout << request << endl;
 
                     if (process_request(request, client_fd) == ReturnStatus::FAILURE)
                     {
@@ -482,29 +480,30 @@ private:
             }
 
             replica_map[request.request_replica_id.slot_id].request_ptr->request.reset();
-            ReplyResponse reply;
 
             if (sem_wait(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
             {
                 perror("At JobManager, sem_wait");
                 return ReturnStatus::FAILURE;
             }
-
             
             replica_map[request.request_replica_id.slot_id].request_ptr->request = request;
             
-            replica_map[request.request_replica_id.slot_id].request_ptr->request.print();
+            // cout << "*******************************************************" << endl;
+            // replica_map[request.request_replica_id.slot_id].request_ptr->request.print();
+            // cout << "*******************************************************" << endl;
+
             if (sem_post(&replica_map[request.request_replica_id.slot_id].request_ptr->sem) == -1)
             {
                 perror("At JobManager, sem_post");
                 return ReturnStatus::FAILURE;
             }
+            cout << "Have sent request; Waiting for reply" << endl;
             if (sem_wait(&replica_map[request.request_replica_id.slot_id].reply_ptr->sem) == -1)
             {
                 perror("At JobManager, sem_wait");
                 return ReturnStatus::FAILURE;
             }
-
             reply = replica_map[request.request_replica_id.slot_id].reply_ptr->reply;
 
             if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_access) == -1)
@@ -513,6 +512,7 @@ private:
                 return ReturnStatus::FAILURE;
             }
         }
+        // return ReturnStatus::SUCCESS;
         return process_reply(reply, client_fd);
     }
 
@@ -526,7 +526,7 @@ private:
         }
 
         // Initialize the shared memories and semaphores for the replica
-        access_str = JOB_REP_SHM_NAME + own_replica.serialize();
+        access_str = JOB_REP_SHM_NAME + to_string(own_replica.availability_zone_id) + "_" + to_string(own_replica.slot_id);
 
         int req_shm_fd, rep_shm_fd, addr_map_shm_fd;
         if ((req_shm_fd = shm_open((access_str + "req").c_str(), O_CREAT | O_RDWR, 0777)) == -1)

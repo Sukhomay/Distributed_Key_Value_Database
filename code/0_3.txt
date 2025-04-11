@@ -1,12 +1,15 @@
+Replica Machine (0, 3) running...
+Socket bound to : <127.0.0.1, 44219>
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Replica Map received at ReplicaMachine (0, 3)
+(0, 3) -> 127.0.0.1:44219
+(1, 4) -> 127.0.0.1:50109
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 We are inside the file
-Received request from JobManager
+RepM out of wait
+4
 +--------------------------------------------------------+
 | RequestQuery:
 |   Request Replica: (0, 3)
-|   Other Replicas (0):
-|   Request ID: 4294967296
-|   Operation: SET
-|   Key: aaa
-|   Value: AAA
-+--------------------------------------------------------+
-We are inside the file
+|   Other Replicas (1):
+|      (

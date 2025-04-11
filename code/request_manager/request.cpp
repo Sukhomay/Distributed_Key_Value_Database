@@ -158,14 +158,13 @@ int main()
     RequestQuery req;
     req.operation = Operation::CREATE_PROPAGATE;
     req.request_replica_id = ReplicaID{0, 3};
-    // req.sibling_replica_id.push_back(ReplicaID{1, 4});
+    req.sibling_replica_id.push_back(ReplicaID{1, 4});
 
     req.print();
     send_all(sockfd, req.serialize());
 
-
     recv_all(sockfd, resp);
-
+    cout << resp << endl;
     ReplyResponse reply_resp = ReplyResponse::deserialize(resp);
     reply_resp.print();
 
@@ -178,6 +177,8 @@ int main()
     send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
+    cout << resp << endl;
+
 
     reply_resp = ReplyResponse::deserialize(resp);
     reply_resp.print();
@@ -191,6 +192,8 @@ int main()
     send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
+    cout << resp << endl;
+
 
     reply_resp = ReplyResponse::deserialize(resp);
     reply_resp.print();
@@ -203,6 +206,8 @@ int main()
     send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
+    cout << resp << endl;
+
 
     reply_resp = ReplyResponse::deserialize(resp);
     reply_resp.print();
@@ -215,6 +220,8 @@ int main()
     send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
+    cout << resp << endl;
+
 
     reply_resp = ReplyResponse::deserialize(resp);
     reply_resp.print();
@@ -227,6 +234,8 @@ int main()
     send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
+    cout << resp << endl;
+
 
     reply_resp = ReplyResponse::deserialize(resp);
     reply_resp.print();
@@ -239,6 +248,8 @@ int main()
     send_all(sockfd, req.serialize());
 
     recv_all(sockfd, resp);
+    cout << resp << endl;
+
 
     reply_resp = ReplyResponse::deserialize(resp);
     reply_resp.print();

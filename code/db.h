@@ -250,23 +250,24 @@ typedef struct RequestQuery
     void print() const
     {
         string border = "+--------------------------------------------------------+";
-        cout << border << "\n";
-        cout << "| RequestQuery:" << "\n";
+        cout << border << endl;
+        cout << "| RequestQuery:" << endl;
         cout << "|   Request Replica: ";
         request_replica_id.print();
-        cout << "\n";
-        cout << "|   Other Replicas (" << sibling_replica_id.size() << "):\n";
+        cout << endl;
+        cout << "|   Other Replicas (" << sibling_replica_id.size() << "):" << endl;
         for (const auto &rep : sibling_replica_id)
         {
             cout << "|      ";
             rep.print();
-            cout << "\n";
+            cout << endl;
         }
-        cout << "|   Request ID: " << request_id << "\n";
-        cout << "|   Operation: " << operationToString(operation) << "\n";
-        cout << "|   Key: " << key << "\n";
-        cout << "|   Value: " << value << "\n";
-        cout << border << "\n";
+        cout << "|   Request ID: " << request_id << endl;
+        cout << "|   Operation: " << operationToString(operation) << endl;
+        cout << "|   Key: " << key << endl;
+        cout << "|   Value: " << value << endl;
+        cout << border << endl;
+        cout << endl;
     }
 
     // Serialize as a flat sequence of tokens using only DELIM:
@@ -364,15 +365,15 @@ typedef struct ReplyResponse
     void print() const
     {
         string border = "+--------------------------------------------------------+";
-        cout << border << "\n";
-        cout << "| ReplyResponse:" << "\n";
+        cout << border << endl;
+        cout << "| ReplyResponse:" << endl;
         cout << "|   Response Replica: ";
         reponse_replica_id.print();
-        cout << "\n";
-        cout << "|   Request ID: " << request_id << "\n";
-        cout << "|   Status: " << (status == SUCCESS ? "SUCCESS" : "FAILURE") << "\n";
-        cout << "|   Value: " << value << "\n";
-        cout << border << "\n";
+        cout << endl;
+        cout << "|   Request ID: " << request_id << endl;
+        cout << "|   Status: " << (status == SUCCESS ? "SUCCESS" : "FAILURE") << endl;
+        cout << "|   Value: " << value << endl;
+        cout << border << endl;
     }
 
     // Serialize as:
@@ -556,33 +557,33 @@ typedef struct RaftQuery
     void print() const
     {
         string border = "+--------------------------------------------------------+";
-        cout << border << "\n";
-        cout << "| RaftQuery:\n";
-        cout << "|   Valid: " << (valid ? "true" : "false") << "\n";
-        cout << "|   Message Type: " << messageToString(msg_type) << "\n";
+        cout << border << endl;
+        cout << "| RaftQuery:" << endl;
+        cout << "|   Valid: " << (valid ? "true" : "false") << endl;
+        cout << "|   Message Type: " << messageToString(msg_type) << endl;
         cout << "|   Sender: ";
         sender.print();
-        cout << "\n";
-        cout << "|   Current Term: " << currentTerm << "\n";
-        cout << "|   Last Term: " << lastTerm << "\n";
-        cout << "|   Prefix Term: " << prefixTerm << "\n";
-        cout << "|   Prefix Len: " << prefixLen << "\n";
-        cout << "|   Commit Length: " << commitLength << "\n";
-        cout << "|   Log Length: " << logLength << "\n";
-        cout << "|   Granted: " << (granted ? "true" : "false") << "\n";
-        cout << "|   Suffix Count: " << suffix.size() << "\n";
+        cout << endl;
+        cout << "|   Current Term: " << currentTerm << endl;
+        cout << "|   Last Term: " << lastTerm << endl;
+        cout << "|   Prefix Term: " << prefixTerm << endl;
+        cout << "|   Prefix Len: " << prefixLen << endl;
+        cout << "|   Commit Length: " << commitLength << endl;
+        cout << "|   Log Length: " << logLength << endl;
+        cout << "|   Granted: " << (granted ? "true" : "false") << endl;
+        cout << "|   Suffix Count: " << suffix.size() << endl;
         for (const auto &le : suffix)
         {
             cout << "|     ";
             le.print();
-            cout << "\n";
+            cout << endl;
         }
-        cout << "|   Ack: " << ack << "\n";
-        cout << "|   Success: " << (success ? "true" : "false") << "\n";
-        cout << border << "\n";
-        cout << "|   Embedded RequestQuery:\n";
+        cout << "|   Ack: " << ack << endl;
+        cout << "|   Success: " << (success ? "true" : "false") << endl;
+        cout << border << endl;
+        cout << "|   Embedded RequestQuery:" << endl;
         request_query.print();
-        cout << border << "\n";
+        cout << border << endl;
     }
 
     // Serialize RaftQuery using only DELIM.
@@ -705,16 +706,16 @@ typedef struct LogMessage
     void print() const
     {
         string border = "+--------------------------------------------------------+";
-        cout << border << "\n";
-        cout << "| LogMessage:\n";
-        cout << "|   Local Time: " << localTime << "\n";
-        cout << "|   Operation: " << operationToString(op) << "\n";
-        cout << "|   Key: " << key << "\n";
-        cout << "|   Value: " << value << "\n";
+        cout << border << endl;
+        cout << "| LogMessage:" << endl;
+        cout << "|   Local Time: " << localTime << endl;
+        cout << "|   Operation: " << operationToString(op) << endl;
+        cout << "|   Key: " << key << endl;
+        cout << "|   Value: " << value << endl;
         cout << "|   Replica: ";
         replicaID.print();
-        cout << "\n"
-             << border << "\n";
+        cout << endl
+             << border << endl;
     }
 
     // Serialize as:
@@ -827,7 +828,7 @@ bool send_all(int sockfd, string message, char delimiter = '\n')
 bool recv_all(int sockfd, string &result, char delimiter = '\n')
 {
     result.clear();
-    char buffer[512];
+    char buffer[MAX_STR_SIZE];
     while (true)
     {
         int recvd = recv(sockfd, buffer, sizeof(buffer), 0);
@@ -905,7 +906,7 @@ Address getReplicaAddr(const ReplicaID &replica)
     ifstream inFile("CONFIG.json");
     if (!inFile)
     {
-        cerr << "Unable to open file\n";
+        cerr << "Unable to open file" << endl;
         return Address(); // Return a default Address with empty host and port 0.
     }
 

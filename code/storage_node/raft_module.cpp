@@ -29,12 +29,12 @@ public:
         // 3. Waiting on shared memory for user requests --> Not here, main() of replica_machine is doing this
         // initState();
 
-        mt = new MergeTree(to_string(nodeId.availability_zone_id) + "_" + to_string(nodeId.slot_id));
-        Address node_addr = replicaInfo[nodeId];
-        std::thread thread1(&Raft::runPeriodicTask, this);
-        std::thread thread2(&Raft::startTcpServer, this, node_addr);
-        thread1.join();
-        thread2.join();
+        // mt = new MergeTree(to_string(nodeId.availability_zone_id) + "_" + to_string(nodeId.slot_id));
+        // Address node_addr = replicaInfo[nodeId];
+        // std::thread thread1(&Raft::runPeriodicTask, this);
+        // std::thread thread2(&Raft::startTcpServer, this, node_addr);
+        // thread1.join();
+        // thread2.join();
     }
 
     ~Raft()
@@ -92,45 +92,46 @@ public:
 
     void onReceiveUserRequest(RequestQuery &request)
     {
+        cout << "hhhhhhhhhhhhhhhhhhhhhh" << endl;
         /////// Need to fix !!!!
         std::lock_guard<std::mutex> lock(mtx);
         cout << "Received User Request" << endl;
         request.print();
         cout << endl;
-        LogMessage logmsg;
-        logmsg.op = request.operation;
-        logmsg.key = string(request.key, request.key_len);
-        logmsg.value = string(request.value, request.value_len);
-        logmsg.replicaID = nodeId;
-        logmsg.localTime = getCurrentLocalTime();
-        if (currentRole == LEADER)
-        {
-            // Append the record to log
-            log.emplace_back(LogEntry(currentTerm, logmsg.format()));
+        // LogMessage logmsg;
+        // logmsg.op = request.operation;
+        // logmsg.key = string(request.key, request.key_len);
+        // logmsg.value = string(request.value, request.value_len);
+        // logmsg.replicaID = nodeId;
+        // logmsg.localTime = getCurrentLocalTime();
+        // if (currentRole == LEADER)
+        // {
+        //     // Append the record to log
+        //     log.emplace_back(LogEntry(currentTerm, logmsg.format()));
 
-            // Acknowledge for self
-            ackedLength[nodeId.slot_id] = log.size();
+        //     // Acknowledge for self
+        //     ackedLength[nodeId.slot_id] = log.size();
 
-            // Replicate to all followers
-            for (const ReplicaID &follower : nodes)
-            {
-                if (follower.slot_id != nodeId.slot_id)
-                {
-                    replicateLog(follower);
-                }
-            }
-        }
-        else
-        {
-            RaftQuery raftQuery;
-            raftQuery.reset();
-            raftQuery.request_query = request;
-            raftQuery.msg_type = Message::UserRequest;
-            cout << "Sending request to Leader : ";
-            currentLeader.print();
-            cout << endl;
-            sendReplica(replicaInfo[currentLeader], raftQuery.serialize());
-        }
+        //     // Replicate to all followers
+        //     for (const ReplicaID &follower : nodes)
+        //     {
+        //         if (follower.slot_id != nodeId.slot_id)
+        //         {
+        //             replicateLog(follower);
+        //         }
+        //     }
+        // }
+        // else
+        // {
+        //     RaftQuery raftQuery;
+        //     raftQuery.reset();
+        //     raftQuery.request_query = request;
+        //     raftQuery.msg_type = Message::UserRequest;
+        //     cout << "Sending request to Leader : ";
+        //     currentLeader.print();
+        //     cout << endl;
+        //     sendReplica(replicaInfo[currentLeader], raftQuery.serialize());
+        // }
     }
 
 private:
@@ -555,11 +556,11 @@ private:
         // // Simulate sending (LogRequest, leaderId, currentTerm, prefixLen,
         // // prefixTerm, commitLength, suffix) to followerId
         // cout << "Sending LogRequest to follower " << followerId.slot_id << ":\n";
-        // cout << "  Leader ID     : " << nodeId << "\n";
-        // cout << "  Term          : " << currentTerm << "\n";
-        // cout << "  Prefix Length : " << prefixLen << "\n";
-        // cout << "  Prefix Term   : " << prefixTerm << "\n";
-        // cout << "  Commit Length : " << commitLength << "\n";
+        // cout << "  Leader ID     : " << nodeId << endl;
+        // cout << "  Term          : " << currentTerm << endl;
+        // cout << "  Prefix Length : " << prefixLen << endl;
+        // cout << "  Prefix Term   : " << prefixTerm << endl;
+        // cout << "  Commit Length : " << commitLength << endl;
         // cout << "  Suffix        : [";
         // for (const auto &entry : suffix)
         // {
@@ -621,9 +622,9 @@ private:
             int ack = prefixLen + suffix.size();
 
             // cout << "Sending LogResponse to leader " << leaderId << ":\n";
-            // cout << "  From Node     : " << nodeId.slot_id << "\n";
-            // cout << "  Term          : " << currentTerm << "\n";
-            // cout << "  Ack           : " << ack << "\n";
+            // cout << "  From Node     : " << nodeId.slot_id << endl;
+            // cout << "  Term          : " << currentTerm << endl;
+            // cout << "  Ack           : " << ack << endl;
             // cout << "  Success       : true\n";
 
             request.ack = ack;
@@ -633,8 +634,8 @@ private:
         else
         {
             // cout << "Sending LogResponse to leader " << leaderId << ":\n";
-            // cout << "  From Node     : " << nodeId.slot_id << "\n";
-            // cout << "  Term          : " << currentTerm << "\n";
+            // cout << "  From Node     : " << nodeId.slot_id << endl;
+            // cout << "  Term          : " << currentTerm << endl;
             // cout << "  Ack           : 0\n";
             // cout << "  Success       : false\n";
 

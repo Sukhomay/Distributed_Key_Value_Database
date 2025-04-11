@@ -20,7 +20,7 @@ public:
         : replica_id(_replica_id_), sibling_replica_id(_sibling_replica_id_)
     {
         // Setup the shared memories for the replica
-        string access_str = JOB_REP_SHM_NAME + replica_id.serialize();
+        string access_str = JOB_REP_SHM_NAME + to_string(replica_id.availability_zone_id) + "_" + to_string(replica_id.slot_id);
 
         int req_shm_fd, rep_shm_fd, addr_map_shm_fd;
         if ((req_shm_fd = shm_open((access_str + "req").c_str(), O_RDWR, 0777)) == -1)
@@ -70,9 +70,6 @@ public:
             perror("At ReplicaMachine, mmap");
         }
         addr_map_ptr = static_cast<ReplicaInfo *>(addr_map_shm_ptr);
-
-        // Set up the LSM Ttree
-        // raft_machine = new Raft(replica_id, sibling_replica_id.size() + 1, sibling_replica_id, request_ptr, reply_ptr);
     }
 
     ~ReplicaMachine()
@@ -177,16 +174,7 @@ private:
     // Main event loop (to be implemented)
     int run(int sockfd)
     {
-        string file_name = to_string(replica_id.availability_zone_id) + "_" + to_string(replica_id.slot_id) + ".txt";
-        std::ofstream outFile(file_name, std::ios::out | std::ios::trunc);
-        if (!outFile)
-        {
-            std::cerr << "Error opening file for output.\n";
-            return 1;
-        }
-        std::streambuf *coutbuf = std::cout.rdbuf(); // optionally save old buffer if you plan to restore it later
-        std::cout.rdbuf(outFile.rdbuf());
-        // raft_machine = new Raft(replica_id, sibling_replica_id.size() + 1, sibling_replica_id, reply_ptr, sockfd, replica_addr_map);
+        raft_machine = new Raft(replica_id, sibling_replica_id.size() + 1, sibling_replica_id, reply_ptr, sockfd, replica_addr_map);
         while (true)
         {
             // wait for the request to come
@@ -196,9 +184,21 @@ private:
                 perror("At ReplicaMachine, sem_wait");
                 return EXIT_FAILURE;
             }
+            cout << "RepM out of wait" << endl;
+            cout << request_ptr->request.key_len << endl;
+            // request_ptr->request.print();
             cout << "Received request from JobManager" << endl;
-            request_ptr->request.print();
-            // raft_machine->onReceiveUserRequest(request_ptr->request);
+            cout << endl;
+            raft_machine->onReceiveUserRequest(request_ptr->request);
+
+            ReplyResponse resp;
+            resp.status = ReturnStatus::SUCCESS;
+            reply_ptr->reply = resp;
+            if (sem_post(&(reply_ptr->sem)) == -1)
+            {
+                perror("At ReplicaMachine, sem_post");
+                return EXIT_FAILURE;
+            }
         }
         return EXIT_SUCCESS;
     }
@@ -215,9 +215,20 @@ int main(int argc, char *argv[])
             cerr << "Error at ReplicaMachine: not sufficient arguments provided" << endl;
             return EXIT_FAILURE;
         }
-
         ReplicaID my_replica_id = ReplicaID::deserialize(argv[1]);
         vector<ReplicaID> sibling_replica_id = SiblingReplica::deserialize(argv[2]).replicas;
+
+        // string file_name = to_string(my_replica_id.availability_zone_id) + "_" + to_string(my_replica_id.slot_id) + ".txt";
+        // std::ofstream outFile(file_name, std::ios::out | std::ios::trunc);
+        // if (!outFile)
+        // {
+        //     std::cerr << "Error opening file for output." << endl;
+        //     return 1;
+        // }
+        // std::streambuf *coutbuf = std::cout.rdbuf(); // optionally save old buffer if you plan to restore it later
+        // std::cout.rdbuf(outFile.rdbuf());
+
+        std::cout << std::unitbuf;
 
         ReplicaMachine replica(my_replica_id, sibling_replica_id);
         return replica.start();
