@@ -4,19 +4,20 @@
 #include <algorithm>
 #include <bits/stdc++.h>
 
-using namespace std;
+// using namespace std;
 
 struct AVLTreeNode
 {
+    std::string key;
+    std::string value;
+    
     AVLTreeNode *left;
     AVLTreeNode *right;
 
-    string key;
-    string value;
     int count;
     int height;
 
-    AVLTreeNode(const string &key, const string &value);
+    AVLTreeNode(const std::string &key, const std::string &value);
     void updateValues();
     int balanceFactor();
 
@@ -24,13 +25,13 @@ struct AVLTreeNode
     AVLTreeNode *right_rotate();
 };
 
-AVLTreeNode::AVLTreeNode(const string &key, const string &value)
+AVLTreeNode::AVLTreeNode(const std::string &key, const std::string &value)
     : key(key), value(value), left(nullptr), right(nullptr), count(1), height(1) {}
 
 void AVLTreeNode::updateValues()
 {
     count = (left ? left->count : 0) + (right ? right->count : 0) + 1;
-    height = max(left ? left->height : 0, right ? right->height : 0) + 1;
+    height = std::max(left ? left->height : 0, right ? right->height : 0) + 1;
 }
 
 int AVLTreeNode::balanceFactor()
@@ -63,22 +64,22 @@ class AVLTree
     AVLTreeNode *root;
     int _size;
 
-    void balance(vector<AVLTreeNode **> &path);
+    void balance(std::vector<AVLTreeNode **> &path);
     void clearHelper(AVLTreeNode *node);
 
 public:
     AVLTree();
     ~AVLTree();
 
-    void insert(const string &key, const string &value);
-    void erase(const string &key);
+    void insert(const std::string &key, const std::string &value);
+    void erase(const std::string &key);
     void clear();
     bool empty() const;
     int size() const;
-    vector<pair<string, string>> getSortedPairs() const;
+    std::vector<std::pair<std::string, std::string>> getSortedPairs() const;
 
-    pair<bool, string> find(const string &key) const;
-    string operator[](int idx) const;
+    std::pair<bool, std::string> find(const std::string &key) const;
+    std::string operator[](int idx) const;
 };
 
 AVLTree::AVLTree() : root(nullptr), _size(0) {}
@@ -115,10 +116,10 @@ int AVLTree::size() const
     return _size;
 }
 
-void AVLTree::insert(const string &key, const string &value)
+void AVLTree::insert(const std::string &key, const std::string &value)
 {   
     AVLTreeNode **indirect = &root;
-    vector<AVLTreeNode **> path;
+    std::vector<AVLTreeNode **> path;
 
     while (*indirect != nullptr)
     {
@@ -142,10 +143,10 @@ void AVLTree::insert(const string &key, const string &value)
     _size++;
 }
 
-void AVLTree::erase(const string &key)
+void AVLTree::erase(const std::string &key)
 {
     AVLTreeNode **indirect = &root;
-    vector<AVLTreeNode **> path;
+    std::vector<AVLTreeNode **> path;
 
     while (*indirect != nullptr && (*indirect)->key != key)
     {
@@ -195,7 +196,7 @@ void AVLTree::erase(const string &key)
     _size--;
 }
 
-pair<bool, string> AVLTree::find(const string &key) const
+std::pair<bool, std::string> AVLTree::find(const std::string &key) const
 {
     AVLTreeNode *direct = root;
 
@@ -208,10 +209,10 @@ pair<bool, string> AVLTree::find(const string &key) const
         else
             direct = direct->right;
     }
-    return make_pair(false, "tombstone"); // Key not found
+    return std::make_pair(false, "tombstone"); // Key not found
 }
 
-string AVLTree::operator[](int idx) const
+std::string AVLTree::operator[](int idx) const
 {
     AVLTreeNode *cur = root;
     int left = cur->left ? cur->left->count : 0;
@@ -234,7 +235,7 @@ string AVLTree::operator[](int idx) const
     return cur->value;
 }
 
-void AVLTree::balance(vector<AVLTreeNode **> &path)
+void AVLTree::balance(std::vector<AVLTreeNode **> &path)
 {
     reverse(path.begin(), path.end());
 
@@ -261,10 +262,10 @@ void AVLTree::balance(vector<AVLTreeNode **> &path)
     }
 }
 
-vector<pair<string, string>> AVLTree::getSortedPairs() const
+std::vector<std::pair<std::string, std::string>> AVLTree::getSortedPairs() const
 {
-    vector<pair<string, string>> result;
-    function<void(AVLTreeNode *)> inOrderTraversal = [&](AVLTreeNode *node)
+    std::vector<std::pair<std::string, std::string>> result;
+    std::function<void(AVLTreeNode *)> inOrderTraversal = [&](AVLTreeNode *node)
     {
         if (node == nullptr)
             return;
