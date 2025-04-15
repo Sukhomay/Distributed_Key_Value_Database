@@ -152,6 +152,7 @@
     "__node_handle": "cpp",
     "__memory": "cpp",
     "__config": "cpp",
-    "strstream": "cpp"
+    "strstream": "cpp",
+    "ios": "cpp"
   }
 }
