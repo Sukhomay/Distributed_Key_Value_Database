@@ -32,7 +32,7 @@ typedef struct ReplicaAccess
     pid_t pid;
     string commfile;
     int commfd;
-    sem_t sem_comm;
+    sem_t *sem_comm;
     sem_t sem_access;
     bool is_valid = false;
 
@@ -344,16 +344,16 @@ private:
             reply.status = create_replica(request.request_replica_id);
 
             // Wait for replica Machine to give its address info
-            if (sem_wait(&(replica_map[request_slot_id].sem_comm)) == -1)
+            if (sem_wait(replica_map[request_slot_id].sem_comm) == -1)
             {
                 perror("At JobManager, sem_wait");
                 return ReturnStatus::FAILURE;
             }
-            
-            string addr_str =  read_first_line(replica_map[request_slot_id].commfd);
+
+            string addr_str = read_first_line(replica_map[request_slot_id].commfd);
             Address request_replica_addr = Address::deserialize(addr_str);
             replica_map[request_slot_id].replica_addr_map[request_replica_id] = request_replica_addr;
-            
+
             string complete_map_str;
             if (request.operation == Operation::CREATE_PROPAGATE)
             {
@@ -437,7 +437,7 @@ private:
             // Provide the replica machine with info of all its sibling to my own repplica
             write_first_line(replica_map[request_slot_id].commfd, complete_map_str);
 
-            if (sem_post(&replica_map[request.request_replica_id.slot_id].sem_comm) == -1)
+            if (sem_post(replica_map[request.request_replica_id.slot_id].sem_comm) == -1)
             {
                 perror("At JobManager, sem_post");
                 return ReturnStatus::FAILURE;
@@ -458,7 +458,7 @@ private:
                 return ReturnStatus::FAILURE;
             }
 
-            if(request.operation == Operation::SET || request.operation == Operation::GET || request.operation == Operation::DEL)
+            if (request.operation == Operation::SET || request.operation == Operation::GET || request.operation == Operation::DEL)
             {
                 write_first_line(replica_map[request_slot_id].commfd, request_str);
             }
@@ -467,7 +467,7 @@ private:
                 cerr << "Unknown command" << endl;
             }
 
-            if (sem_post(&replica_map[request_slot_id].sem_comm) == -1)
+            if (sem_post(replica_map[request_slot_id].sem_comm) == -1)
             {
                 perror("At JobManager, sem_post");
                 return ReturnStatus::FAILURE;
@@ -475,7 +475,7 @@ private:
 
             cout << "Have sent request; Waiting for reply" << endl;
 
-            if (sem_wait(&replica_map[request_slot_id].sem_comm) == -1)
+            if (sem_wait(replica_map[request_slot_id].sem_comm) == -1)
             {
                 perror("At JobManager, sem_wait");
                 return ReturnStatus::FAILURE;
@@ -508,10 +508,11 @@ private:
             return ReturnStatus::FAILURE;
         }
 
-        if (sem_init(&replica_map[replica_id.slot_id].sem_comm, 1, 1) == -1)
+        replica_map[replica_id.slot_id].sem_comm = sem_open(("/" + to_string(replica_id.availability_zone_id) + "_" + to_string(replica_id.slot_id)).c_str(), O_CREAT, 0777, 1);
+        if (replica_map[replica_id.slot_id].sem_comm == SEM_FAILED)
         {
-            perror("At JobManager, sem_init");
-            return ReturnStatus::FAILURE;
+            perror("sem_open");
+            exit(EXIT_FAILURE);
         }
 
         string commfile = "commfile_" + to_string(replica_id.availability_zone_id) + "_" + to_string(replica_id.slot_id);
@@ -560,7 +561,6 @@ private:
         return ReturnStatus::SUCCESS;
     }
 };
-
 
 int main(int argc, char *argv[])
 {
